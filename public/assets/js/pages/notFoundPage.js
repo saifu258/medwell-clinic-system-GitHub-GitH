@@ -1,0 +1,2 @@
+import { pageHeader, wireCommonActions } from "../components/ui.js";
+export async function render(root) { root.innerHTML = pageHeader("ไม่พบหน้า") + `<section class="card empty-state"><i data-lucide="map-pin-off"></i><h3>ไม่พบหน้าที่คุณต้องการ</h3><p>ตรวจสอบ URL หรือกลับไปยังหน้าภาพรวม</p><a class="btn btn-primary" href="#/dashboard">กลับ Dashboard</a></section>`; wireCommonActions(root, () => location.reload()); }

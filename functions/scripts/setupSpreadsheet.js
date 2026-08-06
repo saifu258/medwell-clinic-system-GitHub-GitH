@@ -1,0 +1,12 @@
+import { google } from "googleapis";
+import { SCHEMA } from "../src/config/schema.js";
+const spreadsheetId = process.env.SPREADSHEET_ID;
+if (!spreadsheetId || spreadsheetId === "YOUR_SPREADSHEET_ID") throw new Error("กรุณากำหนด SPREADSHEET_ID");
+const auth = new google.auth.GoogleAuth({ scopes: ["https://www.googleapis.com/auth/spreadsheets"] });
+const sheets = google.sheets({ version: "v4", auth });
+const metadata = await sheets.spreadsheets.get({ spreadsheetId });
+const existing = new Set(metadata.data.sheets.map((sheet) => sheet.properties.title));
+const missing = Object.keys(SCHEMA).filter((title) => !existing.has(title));
+if (missing.length) await sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: missing.map((title) => ({ addSheet: { properties: { title, frozenRowCount: 1 } } })) } });
+await sheets.spreadsheets.values.batchUpdate({ spreadsheetId, requestBody: { valueInputOption: "RAW", data: Object.entries(SCHEMA).map(([name, headers]) => ({ range: `'${name}'!A1`, values: [headers] })) } });
+console.log(`เตรียม Spreadsheet สำเร็จ ${Object.keys(SCHEMA).length} ชีต`);

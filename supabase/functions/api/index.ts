@@ -1,0 +1,358 @@
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { db } from "./db.ts";
+import { verifyFirebaseRequest } from "./auth.ts";
+import { dbError, failure, hasPermission, isValidThaiCitizenId, nowIso, nullifyBlankStrings, randomCode, requireAdmin, requirePermission, success, todayBangkok, toSnake, validateAppointmentInput, validateGoogleRoleSelection } from "./helpers.ts";
+
+const allowedOrigins = new Set(["http://localhost:5000", "http://127.0.0.1:4173", "https://medwell-clinic-system.web.app", "https://medwell-clinic-system.firebaseapp.com"]);
+const cors = (request: Request) => { const origin = request.headers.get("origin") || ""; return { "access-control-allow-origin": allowedOrigins.has(origin) ? origin : "https://medwell-clinic-system.web.app", "access-control-allow-headers": "authorization, content-type, idempotency-key", "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS", vary: "Origin" }; };
+const body = async (request: Request) => request.headers.get("content-type")?.includes("application/json") ? await request.json() : {};
+const actorFields = (uid: string, creating = false) => ({ ...(creating ? { created_by: uid } : {}), updated_by: uid });
+const routePath = (request: Request) => { const pathname = new URL(request.url).pathname; const marker = pathname.indexOf("/api"); return marker >= 0 ? pathname.slice(marker + 4) || "/" : pathname; };
+const err = (message: string, status = 400, code = "VALIDATION_ERROR") => Object.assign(new Error(message), { status, code });
+const patientFields = new Set(["title", "first_name", "last_name", "nickname", "citizen_id", "passport_no", "gender", "date_of_birth", "blood_type", "nationality", "religion", "occupation", "phone", "email", "address", "province", "postal_code", "emergency_name", "emergency_relation", "emergency_phone", "drug_allergies", "chronic_diseases", "notes", "consent_status", "consent_date"]);
+const patientInput = (value: Record<string, unknown>) => nullifyBlankStrings(Object.fromEntries(Object.entries(value).filter(([key]) => patientFields.has(key))));
+
+async function audit(request: Request, profile: any, action: string, module: string, recordId = "", description = "") {
+  await db.from("audit_logs").insert({ user_uid: profile.uid, user_name: profile.display_name, roles: profile.roles, action, module, record_id: recordId, description: description.slice(0, 500), user_agent: (request.headers.get("user-agent") || "").slice(0, 300), success: true });
+}
+
+async function auditIdentity(request: Request, identity: any, action: string, successValue = true, errorCode = "") {
+  await db.from("audit_logs").insert({
+    user_uid: identity.uid,
+    user_name: identity.name || identity.email,
+    roles: [],
+    action,
+    module: "authentication",
+    record_type: "firebase_identity",
+    record_id: identity.uid,
+    description: "Google authentication event",
+    user_agent: (request.headers.get("user-agent") || "").slice(0, 300),
+    success: successValue,
+    error_code: errorCode || null
+  });
+}
+
+async function getProfile(uid: string) {
+  const { data, error } = await db.from("users").select("*").eq("uid", uid).maybeSingle(); dbError(error);
+  if (!data) throw err("ไม่พบบัญชีผู้ใช้ในระบบคลินิก", 403, "PROFILE_NOT_FOUND");
+  if (!data.active) throw err("บัญชีถูกระงับการใช้งาน", 403, "ACCOUNT_DISABLED");
+  return data;
+}
+
+async function listPatients(url: URL) {
+  const page = Math.max(1, Number(url.searchParams.get("page") || 1)); const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") || 20))); const search = (url.searchParams.get("search") || "").replace(/[(),.%]/g, "").trim();
+  let query = db.from("patients").select("*", { count: "exact" }).order("created_at", { ascending: false }).range((page - 1) * limit, page * limit - 1);
+  if (search.length >= 2) query = query.or(`hn.ilike.%${search}%,first_name.ilike.%${search}%,last_name.ilike.%${search}%,citizen_id.ilike.%${search}%,phone.ilike.%${search}%`);
+  const { data, error, count } = await query; dbError(error); return { items: data || [], pagination: { page, limit, total: count || 0, pages: Math.max(1, Math.ceil((count || 0) / limit)) } };
+}
+
+async function dashboard() {
+  const today = todayBangkok();
+  const [queues, appointments, invoices, medicines, lots] = await Promise.all([
+    db.from("queues").select("*,patients(first_name,last_name)").eq("queue_date", today).order("check_in_time"), db.from("appointments").select("*").eq("appointment_date", today).order("start_time"),
+    db.from("invoices").select("paid_amount,status").eq("invoice_date", today), db.from("medicines").select("*"), db.from("stock_lots").select("*").gt("quantity_remaining", 0)
+  ]); [queues.error, appointments.error, invoices.error, medicines.error, lots.error].forEach((error) => dbError(error));
+  const q = queues.data || []; const meds = medicines.data || []; const expiryLimit = Date.now() + 90 * 86400000;
+  return { patientsToday: q.length, waiting: q.filter((x) => ["waiting", "screening", "waiting_doctor"].includes(x.current_status)).length, consulting: q.filter((x) => x.current_status === "in_consultation").length, completed: q.filter((x) => x.current_status === "completed").length, appointmentsToday: appointments.data?.length || 0, revenueToday: (invoices.data || []).filter((x) => x.status === "paid").reduce((sum, x) => sum + Number(x.paid_amount), 0), queues: q.slice(-8).map((row: any) => ({ ...row, patient_name: `${row.patients?.first_name || ""} ${row.patients?.last_name || ""}`.trim() || row.patient_id })), appointments: (appointments.data || []).slice(0, 6), lowStock: meds.filter((x) => Number(x.quantity_remaining || 0) <= Number(x.minimum_stock || 0)).slice(0, 5), expiring: (lots.data || []).filter((x) => { const time = new Date(x.expiry_date).getTime(); return time > Date.now() && time <= expiryLimit; }).slice(0, 5) };
+}
+
+Deno.serve(async (request: Request) => {
+  const requestId = crypto.randomUUID();
+  const path = routePath(request);
+  const headers = { ...cors(request), "x-request-id": requestId };
+  if (request.method === "OPTIONS") return new Response("ok", { headers });
+  try {
+    const url = new URL(request.url);
+    if (request.method === "GET" && path === "/health") return success({ status: "ok", service: "medwell-supabase-api", database: "postgres", timezone: "Asia/Bangkok" }, "พร้อมให้บริการ", 200, headers);
+    const identity = await verifyFirebaseRequest(request); const uid = identity.uid;
+
+    if (request.method === "GET" && path === "/auth/profile") {
+      const { data: profile, error: profileError } = await db.from("users").select("*").eq("uid", uid).maybeSingle(); dbError(profileError);
+      if (profile) {
+        if (!profile.active) { await auditIdentity(request, identity, "google_login_denied", false, "ACCOUNT_DISABLED"); throw err("บัญชีถูกระงับการใช้งาน", 403, "ACCOUNT_DISABLED"); }
+        await db.from("users").update({ last_login_at: nowIso() }).eq("uid", uid);
+        return success({ state: "ACTIVE_USER", profile: { ...profile, displayName: profile.display_name }, redirectRoute: "#/dashboard" }, undefined, 200, headers);
+      }
+      if (identity.provider !== "google.com") throw err("ไม่พบบัญชีผู้ใช้ในระบบคลินิก", 403, "PROFILE_NOT_FOUND");
+      const email = identity.email.trim().toLowerCase();
+      const { data: conflicting, error: conflictError } = await db.from("users").select("uid").eq("email", email).maybeSingle(); dbError(conflictError);
+      if (conflicting) { await auditIdentity(request, identity, "google_login_denied", false, "EMAIL_ALREADY_REGISTERED"); throw err("อีเมลนี้เชื่อมกับบัญชีอื่นอยู่แล้ว", 403, "ACCESS_DENIED"); }
+      const { data: approval, error: approvalError } = await db.from("google_role_approvals").select("approval_id").eq("email", email).eq("active", true).is("used_by", null).maybeSingle(); dbError(approvalError);
+      return success({
+        state: "NEEDS_ROLE_SELECTION",
+        approved: Boolean(approval),
+        user: { displayName: identity.name || email.split("@")[0], email, photoURL: identity.picture || null }
+      }, undefined, 200, headers);
+    }
+
+    if (request.method === "POST" && path === "/auth/select-role") {
+      if (identity.provider !== "google.com") { await auditIdentity(request, identity, "role_selection_denied", false, "GOOGLE_PROVIDER_REQUIRED"); throw err("รองรับเฉพาะบัญชี Google ที่ยืนยันแล้ว", 403, "GOOGLE_PROVIDER_REQUIRED"); }
+      let role: string;
+      try { role = validateGoogleRoleSelection(await body(request)); }
+      catch (error) { await auditIdentity(request, identity, "role_selection_denied", false, "ROLE_NOT_ALLOWED"); throw error; }
+      const { data, error } = await db.rpc("medwell_claim_google_role", {
+        p_uid: uid,
+        p_email: identity.email,
+        p_display_name: identity.name || "",
+        p_photo_url: identity.picture || "",
+        p_role: role,
+        p_provider: identity.provider
+      });
+      if (error) {
+        const code = ["ROLE_NOT_ALLOWED", "ROLE_APPROVAL_DENIED", "ROLE_ALREADY_SELECTED", "GOOGLE_PROVIDER_REQUIRED"].find((item) => error.message?.includes(item)) || "ROLE_APPROVAL_DENIED";
+        await auditIdentity(request, identity, "role_selection_denied", false, code);
+        const message = code === "ROLE_ALREADY_SELECTED"
+          ? "บัญชีนี้เลือกบทบาทไปแล้ว"
+          : code === "ROLE_APPROVAL_DENIED"
+            ? "อีเมลนี้ยังไม่ได้รับการอนุมัติบทบาท หรือตำแหน่งที่เลือกไม่ตรงกับที่คลินิกอนุมัติ"
+            : "ไม่สามารถกำหนดบทบาทนี้ได้";
+        throw err(message, code === "ROLE_ALREADY_SELECTED" ? 409 : 403, code);
+      }
+      return success({ profile: { ...data, displayName: data.display_name }, redirectRoute: "#/dashboard" }, "กำหนดบทบาทสำเร็จ", 201, headers);
+    }
+
+    if (request.method === "POST" && path === "/auth/google-login-audit") {
+      if (identity.provider !== "google.com") throw err("ประเภทผู้ให้บริการเข้าสู่ระบบไม่ถูกต้อง", 403, "GOOGLE_PROVIDER_REQUIRED");
+      await auditIdentity(request, identity, "google_login");
+      return success({ recorded: true }, undefined, 201, headers);
+    }
+
+    const profile = await getProfile(identity.uid);
+
+    if (request.method === "GET" && path === "/me") return success({ ...profile, displayName: profile.display_name }, undefined, 200, headers);
+    if (request.method === "POST" && path === "/audit-events") { const input: any = await body(request); const allowed = new Set(["login", "logout", "print", "export"]); if (!allowed.has(input.action)) throw err("ประเภท Audit event ไม่ถูกต้อง"); await audit(request, profile, input.action, String(input.module || "application"), String(input.recordId || ""), String(input.description || "")); return success({ recorded: true }, undefined, 201, headers); }
+    if (request.method === "GET" && path === "/clinic-info") { const { data, error } = await db.from("clinic_settings").select("key,value").in("key", ["clinicNameTh", "clinicNameEn", "timezone"]); dbError(error); return success(Object.fromEntries((data || []).map((row) => [row.key, row.value])), undefined, 200, headers); }
+    if (request.method === "GET" && path === "/dashboard") return success(await dashboard(), undefined, 200, headers);
+
+    if (request.method === "GET" && path === "/patients") { requirePermission(profile, "patients.read"); return success(await listPatients(url), undefined, 200, headers); }
+    if (request.method === "POST" && path === "/patients") { requirePermission(profile, "patients.write"); const raw: any = toSnake(await body(request)); const input: any = patientInput(raw); if (!input.first_name || !input.last_name || !input.phone) throw err("กรุณากรอกชื่อ นามสกุล และโทรศัพท์"); if (!isValidThaiCitizenId(input.citizen_id)) throw err("เลขบัตรประชาชนไม่ถูกต้อง"); const { data, error } = await db.from("patients").insert({ ...input, hn: randomCode("HN"), ...actorFields(uid, true) }).select().single(); dbError(error); await audit(request, profile, "create", "patients", data.patient_id); return success(data, "เพิ่มผู้ป่วยสำเร็จ", 201, headers); }
+    let match = path.match(/^\/patients\/([0-9a-f-]+)$/i);
+    if (match && request.method === "GET") { requirePermission(profile, "patients.read"); const { data, error } = await db.from("patients").select("*").eq("patient_id", match[1]).single(); dbError(error); await audit(request, profile, "view", "patients", match[1]); return success(data, undefined, 200, headers); }
+    if (match && request.method === "PUT") { requirePermission(profile, "patients.write"); const raw: any = toSnake(await body(request)); const expected = raw.updated_at; const input: any = patientInput(raw); if (input.citizen_id && !isValidThaiCitizenId(input.citizen_id)) throw err("เลขบัตรประชาชนไม่ถูกต้อง"); const query = db.from("patients").update({ ...input, ...actorFields(uid) }).eq("patient_id", match[1]); if (expected) query.eq("updated_at", expected); const { data, error } = await query.select().maybeSingle(); dbError(error); if (!data) throw err("ข้อมูลถูกแก้ไขโดยผู้ใช้อื่น กรุณารีเฟรช", 409, "CONFLICT"); await audit(request, profile, "update", "patients", match[1]); return success(data, "แก้ไขผู้ป่วยสำเร็จ", 200, headers); }
+
+    if (path === "/appointments" && request.method === "GET") { requirePermission(profile, "appointments.read"); const { data, error } = await db.from("appointments").select("*,patients(hn,first_name,last_name)").order("appointment_date", { ascending: false }).limit(500); dbError(error); return success((data || []).map((row: any) => ({ ...row, patient_name: `${row.patients?.first_name || ""} ${row.patients?.last_name || ""}`.trim() || row.patient_id })), undefined, 200, headers); }
+    if (path === "/appointments" && request.method === "POST") {
+      requirePermission(profile, "appointments.write");
+      const input = validateAppointmentInput(await body(request));
+      const idempotencyKey = (request.headers.get("idempotency-key") || "").trim();
+      if (!/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey)) throw err("คำขอสร้างนัดหมายไม่มี Idempotency Key ที่ถูกต้อง", 400, "IDEMPOTENCY_KEY_REQUIRED");
+      const { data, error } = await db.rpc("medwell_create_appointment", {
+        p_patient_id: input.patientId,
+        p_appointment_date: input.appointmentDate,
+        p_start_time: input.startTime,
+        p_end_time: input.endTime,
+        p_doctor_uid: input.doctorUid,
+        p_appointment_type: input.appointmentType,
+        p_reason: input.reason,
+        p_appointment_number: randomCode("AP"),
+        p_idempotency_key: idempotencyKey,
+        p_actor: uid,
+        p_actor_name: profile.display_name,
+        p_actor_roles: profile.roles || []
+      });
+      if (error) {
+        const known = ["PATIENT_NOT_FOUND", "DOCTOR_NOT_FOUND", "APPOINTMENT_CONFLICT", "INVALID_APPOINTMENT_TIME", "INVALID_APPOINTMENT_TYPE", "IDEMPOTENCY_KEY_REQUIRED"].find((code) => error.message?.includes(code));
+        if (known === "PATIENT_NOT_FOUND") throw err("ไม่พบผู้ป่วยที่ใช้งานได้", 404, known);
+        if (known === "DOCTOR_NOT_FOUND") throw err("ไม่พบแพทย์ที่ใช้งานได้", 404, known);
+        if (known === "APPOINTMENT_CONFLICT") throw err("ช่วงเวลานี้มีนัดหมายซ้ำ", 409, known);
+        if (known === "INVALID_APPOINTMENT_TIME") throw err("เวลาสิ้นสุดต้องมากกว่าเวลาเริ่มต้น", 422, known);
+        if (known === "INVALID_APPOINTMENT_TYPE") throw err("ประเภทนัดหมายไม่ถูกต้อง", 422, known);
+        if (known === "IDEMPOTENCY_KEY_REQUIRED") throw err("คำขอสร้างนัดหมายไม่มี Idempotency Key ที่ถูกต้อง", 400, known);
+        dbError(error);
+      }
+      return success(data, "สร้างนัดหมายสำเร็จ", 201, headers);
+    }
+    match = path.match(/^\/appointments\/([0-9a-f-]+)$/i);
+    if (match && request.method === "PUT") { requirePermission(profile, "appointments.write"); const input: any = toSnake(await body(request)); const { data, error } = await db.from("appointments").update({ ...input, ...actorFields(uid) }).eq("appointment_id", match[1]).select().single(); dbError(error); return success(data, undefined, 200, headers); }
+    match = path.match(/^\/appointments\/([0-9a-f-]+)\/check-in$/i);
+    if (match && request.method === "POST") {
+      requirePermission(profile, "queues.write");
+      const reqBody: any = await body(request).catch(() => ({}));
+      const { data: appointment, error: appointmentError } = await db.from("appointments").select("*").eq("appointment_id", match[1]).maybeSingle();
+      if (appointmentError) dbError(appointmentError);
+      if (!appointment) throw err("ไม่พบนัดหมาย", 404, "APPOINTMENT_NOT_FOUND");
+
+      const reqPatientId = reqBody.patientId || reqBody.patient_id;
+      if (reqPatientId && reqPatientId !== appointment.patient_id) throw err("ข้อมูลผู้ป่วยไม่ตรงกับนัดหมาย", 400, "PATIENT_MISMATCH");
+
+      const today = todayBangkok();
+      if (appointment.appointment_date !== today) throw err("เช็กอินได้เฉพาะวันนัดหมาย", 422, "APPOINTMENT_NOT_ELIGIBLE");
+
+      // Check if an active queue already exists for this appointment or patient today
+      const { data: existingQueue } = await db.from("queues").select("*")
+        .eq("queue_date", today)
+        .or(`appointment_id.eq.${match[1]},patient_id.eq.${appointment.patient_id}`)
+        .neq("current_status", "cancelled")
+        .maybeSingle();
+
+      if (existingQueue) {
+        if (appointment.status !== "checked_in") {
+          await db.from("appointments").update({ status: "checked_in", updated_by: uid }).eq("appointment_id", match[1]);
+          appointment.status = "checked_in";
+        }
+        return success({ appointment, queue: existingQueue }, "ผู้ป่วยมีคิวแล้ว", 200, headers);
+      }
+
+      if (!["scheduled", "confirmed"].includes(appointment.status)) throw err("สถานะนัดหมายไม่สามารถเช็กอินได้", 422, "APPOINTMENT_NOT_ELIGIBLE");
+
+      const { data: todayQueues } = await db.from("queues").select("queue_number").eq("queue_date", today);
+      let maxSeq = 0;
+      (todayQueues || []).forEach((q: any) => {
+        const num = parseInt(String(q.queue_number || "").replace(/\D/g, ""), 10);
+        if (!isNaN(num) && num > maxSeq) maxSeq = num;
+      });
+      const queueNumber = `A${String(maxSeq + 1).padStart(3, "0")}`;
+
+      const { data: queueData, error: insertError } = await db.from("queues").insert({
+        queue_date: today,
+        queue_number: queueNumber,
+        patient_id: appointment.patient_id,
+        appointment_id: match[1],
+        current_status: "waiting",
+        current_station: "reception",
+        ...actorFields(uid, true)
+      }).select().single();
+
+      if (insertError) {
+        // Handle race condition idempotency
+        const { data: racedQueue } = await db.from("queues").select("*")
+          .eq("queue_date", today)
+          .or(`appointment_id.eq.${match[1]},patient_id.eq.${appointment.patient_id}`)
+          .neq("current_status", "cancelled")
+          .maybeSingle();
+        if (racedQueue) {
+          await db.from("appointments").update({ status: "checked_in", updated_by: uid }).eq("appointment_id", match[1]);
+          appointment.status = "checked_in";
+          return success({ appointment, queue: racedQueue }, "ผู้ป่วยมีคิวแล้ว", 200, headers);
+        }
+        dbError(insertError);
+      }
+
+      const { data: updatedAppointment } = await db.from("appointments").update({ status: "checked_in", updated_by: uid }).eq("appointment_id", match[1]).select().single();
+      await audit(request, profile, "check_in", "queues", queueData.queue_id);
+      return success({ appointment: updatedAppointment || { ...appointment, status: "checked_in" }, queue: queueData }, "เช็กอินและออกคิวสำเร็จ", 201, headers);
+    }
+    match = path.match(/^\/appointments\/([0-9a-f-]+)\/cancel$/i);
+    if (match && request.method === "POST") { requirePermission(profile, "appointments.write"); const input: any = await body(request); if (!input.reason) throw err("กรุณาระบุเหตุผล"); const { data, error } = await db.from("appointments").update({ status: "cancelled", cancellation_reason: input.reason, updated_by: uid }).eq("appointment_id", match[1]).select().single(); dbError(error); return success(data, undefined, 200, headers); }
+
+    if (path === "/queues/today" && request.method === "GET") { requirePermission(profile, "queues.read"); const { data, error } = await db.from("queues").select("*,patients(hn,first_name,last_name)").eq("queue_date", todayBangkok()).order("check_in_time"); dbError(error); return success(data, undefined, 200, headers); }
+    if (path === "/queues" && request.method === "POST") {
+      requirePermission(profile, "queues.write");
+      const input: any = toSnake(await body(request));
+      const patientId = input.patient_id;
+      if (!patientId) throw err("กรุณาระบุผู้ป่วย", 400, "VALIDATION_ERROR");
+
+      const today = todayBangkok();
+      const { data: existingQueue } = await db.from("queues").select("*")
+        .eq("queue_date", today)
+        .eq("patient_id", patientId)
+        .neq("current_status", "cancelled")
+        .maybeSingle();
+
+      if (existingQueue) {
+        return success({ queue: existingQueue }, "ผู้ป่วยมีคิวแล้ว", 200, headers);
+      }
+
+      const { data: todayQueues } = await db.from("queues").select("queue_number").eq("queue_date", today);
+      let maxSeq = 0;
+      (todayQueues || []).forEach((q: any) => {
+        const num = parseInt(String(q.queue_number || "").replace(/\D/g, ""), 10);
+        if (!isNaN(num) && num > maxSeq) maxSeq = num;
+      });
+      const queueNumber = `A${String(maxSeq + 1).padStart(3, "0")}`;
+
+      const { data, error } = await db.from("queues").insert({
+        ...input,
+        queue_date: today,
+        queue_number: queueNumber,
+        current_status: "waiting",
+        current_station: "reception",
+        ...actorFields(uid, true)
+      }).select().single();
+      if (error) {
+        const { data: racedQueue } = await db.from("queues").select("*")
+          .eq("queue_date", today)
+          .eq("patient_id", patientId)
+          .neq("current_status", "cancelled")
+          .maybeSingle();
+        if (racedQueue) return success({ queue: racedQueue }, "ผู้ป่วยมีคิวแล้ว", 200, headers);
+        dbError(error);
+      }
+      return success({ queue: data }, "ออกคิวสำเร็จ", 201, headers);
+    }
+    match = path.match(/^\/queues\/([0-9a-f-]+)\/status$/i);
+    if (match && request.method === "PUT") { requirePermission(profile, "queues.write"); const input: any = await body(request); const allowedStatuses = new Set(["waiting", "screening", "waiting_doctor", "in_consultation", "waiting_pharmacy", "waiting_payment", "completed", "cancelled"]); if (!allowedStatuses.has(input.status)) throw err("สถานะคิวไม่ถูกต้อง"); if (input.status === "cancelled" && !String(input.reason || "").trim()) throw err("กรุณาระบุเหตุผลการยกเลิกคิว"); const { data: current, error: currentError } = await db.from("queues").select("current_status").eq("queue_id", match[1]).single(); dbError(currentError); if (["completed", "cancelled"].includes(current?.current_status || "")) throw err("คิวสิ้นสุดแล้ว ไม่สามารถเปลี่ยนสถานะได้", 422, "BUSINESS_RULE_ERROR"); const { data, error } = await db.from("queues").update({ current_status: input.status, cancellation_reason: input.status === "cancelled" ? String(input.reason).trim() : null, completed_time: input.status === "completed" ? nowIso() : null, updated_by: uid }).eq("queue_id", match[1]).select().single(); dbError(error); await audit(request, profile, input.status === "cancelled" ? "cancel" : "update", "queues", match[1], input.reason || input.status); return success(data, undefined, 200, headers); }
+    match = path.match(/^\/queues\/([0-9a-f-]+)\/call$/i);
+    if (match && request.method === "POST") { requirePermission(profile, "queues.write"); const { data: queue, error: getError } = await db.from("queues").select("call_count").eq("queue_id", match[1]).single(); dbError(getError); const { data, error } = await db.from("queues").update({ called_time: nowIso(), call_count: Number(queue?.call_count || 0) + 1, updated_by: uid }).eq("queue_id", match[1]).select().single(); dbError(error); return success(data, "เรียกคิวแล้ว", 200, headers); }
+
+    if (path === "/screenings" && request.method === "POST") { requirePermission(profile, "screenings.write"); const input: any = toSnake(await body(request)); const numericRanges: Record<string, [number, number]> = { weight: [0.1, 500], height: [20, 250], temperature: [30, 45], pulse: [20, 250], respiratory_rate: [5, 80], systolic: [40, 300], diastolic: [20, 200], spo2: [1, 100], pain_score: [0, 10] }; for (const [field, [min, max]] of Object.entries(numericRanges)) { if (input[field] !== undefined && input[field] !== "") { const value = Number(input[field]); if (!Number.isFinite(value) || value < min || value > max) throw err(`ค่า ${field} ต้องอยู่ระหว่าง ${min}–${max}`); input[field] = value; } } const height = Number(input.height) / 100; const alerts: string[] = []; if (Number(input.systolic) >= 180 || Number(input.diastolic) >= 120) alerts.push("ความดันสูงมาก"); if (Number(input.temperature) >= 38) alerts.push("มีไข้"); if (Number(input.spo2) > 0 && Number(input.spo2) < 95) alerts.push("SpO2 ต่ำ"); const bmi = height > 0 ? Number(input.weight) / (height * height) : null; const { data, error } = await db.rpc("medwell_create_screening", { p_data: input, p_bmi: bmi, p_alerts: alerts, p_actor: uid }); dbError(error); await audit(request, profile, "create", "screenings", data.screening_id); return success(data, "บันทึกคัดกรองสำเร็จ", 201, headers); }
+    match = path.match(/^\/screenings\/([0-9a-f-]+)$/i);
+    if (match && request.method === "GET") { requirePermission(profile, "screenings.read"); const { data, error } = await db.from("screenings").select("*").eq("queue_id", match[1]).order("created_at", { ascending: false }); dbError(error); return success(data, undefined, 200, headers); }
+
+    if (path === "/visits" && request.method === "POST") { requirePermission(profile, "visits.write"); const input: any = toSnake(await body(request)); const { data, error } = await db.rpc("medwell_open_visit", { p_data: input, p_vn: randomCode("VN"), p_visit_date: todayBangkok(), p_actor: uid }); dbError(error); await audit(request, profile, "create", "visits", data.visit_id); return success(data, "เปิด Visit สำเร็จ", 201, headers); }
+    match = path.match(/^\/visits\/([0-9a-f-]+)$/i);
+    if (match && request.method === "GET") { requirePermission(profile, "records.read"); const { data, error } = await db.from("visits").select("*,diagnoses(*),visit_addendums(*)").eq("visit_id", match[1]).single(); dbError(error); await audit(request, profile, "view", "medical_records", match[1]); return success(data, undefined, 200, headers); }
+    if (match && request.method === "PUT") { requirePermission(profile, "visits.write"); const input: any = toSnake(await body(request)); const { data: existing } = await db.from("visits").select("visit_status").eq("visit_id", match[1]).single(); if (existing?.visit_status === "completed") throw err("Visit ปิดแล้ว กรุณาเพิ่ม Addendum", 422, "BUSINESS_RULE_ERROR"); const { data, error } = await db.from("visits").update({ ...input, updated_by: uid }).eq("visit_id", match[1]).select().single(); dbError(error); return success(data, undefined, 200, headers); }
+    match = path.match(/^\/visits\/([0-9a-f-]+)\/complete$/i);
+    if (match && request.method === "POST") { requirePermission(profile, "visits.write"); const { data, error } = await db.from("visits").update({ visit_status: "completed", closed_at: nowIso(), closed_by: uid, updated_by: uid }).eq("visit_id", match[1]).neq("visit_status", "completed").select().single(); dbError(error); const { count } = await db.from("prescriptions").select("prescription_id", { count: "exact", head: true }).eq("visit_id", match[1]).neq("status", "cancelled"); await db.from("queues").update({ current_status: count ? "waiting_pharmacy" : "waiting_payment", updated_by: uid }).eq("queue_id", data.queue_id); await audit(request, profile, "complete", "visits", match[1]); return success(data, "ปิด Visit สำเร็จ", 200, headers); }
+    match = path.match(/^\/visits\/([0-9a-f-]+)\/addendum$/i);
+    if (match && request.method === "POST") { requirePermission(profile, "visits.write"); const input: any = await body(request); if (!input.note || !input.reason) throw err("กรุณาระบุเหตุผลและข้อความ"); const { data, error } = await db.from("visit_addendums").insert({ visit_id: match[1], note: input.note, reason: input.reason, created_by: uid }).select().single(); dbError(error); return success(data, "เพิ่ม Addendum สำเร็จ", 201, headers); }
+
+    if (path === "/prescriptions" && request.method === "POST") { requirePermission(profile, "prescriptions.write"); const input: any = await body(request); if (!Array.isArray(input.items) || !input.items.length) throw err("กรุณาเพิ่มรายการยา"); const prescription = toSnake({ visitId: input.visitId, patientId: input.patientId, queueId: input.queueId || null, notes: input.notes || "" }); const items = toSnake(input.items); const { data: rx, error } = await db.rpc("medwell_create_prescription", { p_data: prescription, p_items: items, p_actor: uid }); dbError(error); await audit(request, profile, "create", "prescriptions", rx.prescription_id); return success(rx, "ออกใบสั่งยาสำเร็จ", 201, headers); }
+    match = path.match(/^\/prescriptions\/([0-9a-f-]+)$/i);
+    if (match && request.method === "GET") { requirePermission(profile, "prescriptions.read"); const { data, error } = await db.from("prescriptions").select("*,prescription_items(*)").eq("prescription_id", match[1]).single(); dbError(error); return success({ ...data, items: data.prescription_items }, undefined, 200, headers); }
+    match = path.match(/^\/prescriptions\/([0-9a-f-]+)\/dispense$/i);
+    if (match && request.method === "POST") { requirePermission(profile, "dispense.write"); const { data, error } = await db.rpc("medwell_dispense_prescription", { p_prescription_id: match[1], p_actor: uid }); dbError(error); await audit(request, profile, "dispense", "pharmacy", match[1]); return success(data, "จ่ายยาสำเร็จ", 200, headers); }
+
+    for (const config of [{ path: "medicines", table: "medicines", id: "medicine_id", read: "medicines.read", write: "inventory.receive" }, { path: "services", table: "services", id: "service_id", read: "services.read", write: "billing.write" }]) {
+      if (path === `/${config.path}` && request.method === "GET") { requirePermission(profile, config.read); const { data, error } = await db.from(config.table).select("*").order("created_at", { ascending: false }); dbError(error); return success(data, undefined, 200, headers); }
+      if (path === `/${config.path}` && request.method === "POST") { requireAdmin(profile); const { data, error } = await db.from(config.table).insert({ ...(toSnake(await body(request)) as object), ...actorFields(uid, true) }).select().single(); dbError(error); return success(data, "สร้างข้อมูลสำเร็จ", 201, headers); }
+      const resourceMatch = path.match(new RegExp(`^/${config.path}/([0-9a-f-]+)$`, "i"));
+      if (resourceMatch && request.method === "PUT") { requireAdmin(profile); const { data, error } = await db.from(config.table).update({ ...(toSnake(await body(request)) as object), ...actorFields(uid) }).eq(config.id, resourceMatch[1]).select().single(); dbError(error); return success(data, undefined, 200, headers); }
+    }
+
+    if (path === "/inventory/receive" && request.method === "POST") { requirePermission(profile, "inventory.receive"); const input: any = toSnake(await body(request)); const { data: lot, error } = await db.rpc("medwell_receive_stock", { p_data: input, p_actor: uid }); dbError(error); await audit(request, profile, "receive", "inventory", lot.lot_id); return success(lot, "รับยาเข้าสต็อกสำเร็จ", 201, headers); }
+    if (path === "/inventory/adjust" && request.method === "POST") { requireAdmin(profile); const input: any = await body(request); const { data, error } = await db.rpc("medwell_adjust_stock", { p_lot_id: input.lotId, p_change: Number(input.quantity), p_reason: input.reason, p_actor: uid, p_reference_id: input.idempotencyKey || crypto.randomUUID() }); dbError(error); await audit(request, profile, "adjust", "inventory", input.lotId, input.reason); return success(data, undefined, 200, headers); }
+    if (path === "/inventory/low-stock" && request.method === "GET") { requirePermission(profile, "inventory.read"); const { data: meds, error } = await db.from("medicines").select("*,stock_lots(quantity_remaining)").eq("active", true); dbError(error); const rows = (meds || []).map((med: any) => ({ ...med, quantity_remaining: med.stock_lots.reduce((sum: number, lot: any) => sum + Number(lot.quantity_remaining), 0) })).filter((med: any) => med.quantity_remaining <= Number(med.minimum_stock)); return success(rows, undefined, 200, headers); }
+    if (path === "/inventory/expiring" && request.method === "GET") { requirePermission(profile, "inventory.read"); const limit = new Date(Date.now() + Number(url.searchParams.get("days") || 90) * 86400000).toISOString().slice(0, 10); const { data, error } = await db.from("stock_lots").select("*,medicines(medicine_code,generic_name,trade_name)").gt("quantity_remaining", 0).gte("expiry_date", todayBangkok()).lte("expiry_date", limit).order("expiry_date"); dbError(error); return success(data, undefined, 200, headers); }
+
+    if (path === "/invoices" && request.method === "POST") { requirePermission(profile, "billing.write"); const input: any = await body(request); if (!Array.isArray(input.items) || !input.items.length) throw err("Invoice ต้องมีรายการ"); for (const item of input.items) { if (!(Number(item.quantity) > 0) || Number(item.unitPrice) < 0 || Number(item.discount || 0) < 0 || Number(item.discount || 0) > Number(item.quantity) * Number(item.unitPrice)) throw err("จำนวน ราคา หรือส่วนลดรายการไม่ถูกต้อง"); } const subtotal = input.items.reduce((sum: number, item: any) => sum + Number(item.quantity) * Number(item.unitPrice) - Number(item.discount || 0), 0); const discount = Number(input.discount || 0); const tax = Number(input.tax || 0); if (discount < 0 || tax < 0 || discount > subtotal) throw err("ส่วนลดหรือภาษีไม่ถูกต้อง"); const grandTotal = subtotal - discount + tax; const invoiceData = toSnake({ visitId: input.visitId, patientId: input.patientId, notes: input.notes || "" }); const items = toSnake(input.items); const { data: invoice, error } = await db.rpc("medwell_create_invoice", { p_data: invoiceData, p_items: items, p_invoice_number: randomCode("INV"), p_invoice_date: todayBangkok(), p_subtotal: subtotal, p_discount: discount, p_tax: tax, p_grand_total: grandTotal, p_actor: uid }); dbError(error); await audit(request, profile, "create", "billing", invoice.invoice_id); return success(invoice, "สร้าง Invoice สำเร็จ", 201, headers); }
+    match = path.match(/^\/invoices\/([0-9a-f-]+)$/i);
+    if (match && request.method === "GET") { requirePermission(profile, "billing.read"); const { data, error } = await db.from("invoices").select("*,invoice_items(*),payments(*)").eq("invoice_id", match[1]).single(); dbError(error); return success({ ...data, items: data.invoice_items }, undefined, 200, headers); }
+    match = path.match(/^\/invoices\/([0-9a-f-]+)\/payments$/i);
+    if (match && request.method === "POST") { requirePermission(profile, "payments.write"); const input: any = await body(request); const idempotency = request.headers.get("idempotency-key") || input.idempotencyKey; const { data, error } = await db.rpc("medwell_record_payment", { p_invoice_id: match[1], p_amount: Number(input.amount), p_method: input.paymentMethod || "cash", p_reference: input.referenceNumber || "", p_notes: input.notes || "", p_idempotency_key: idempotency, p_actor: uid }); dbError(error); await audit(request, profile, "payment", "billing", match[1]); return success(data, "รับชำระเงินสำเร็จ", 201, headers); }
+    match = path.match(/^\/invoices\/([0-9a-f-]+)\/void$/i);
+    if (match && request.method === "POST") { requireAdmin(profile); const input: any = await body(request); if (!input.reason) throw err("กรุณาระบุเหตุผล Void"); const { data, error } = await db.from("invoices").update({ status: "void", void_reason: input.reason, voided_at: nowIso(), voided_by: uid, updated_by: uid }).eq("invoice_id", match[1]).neq("status", "paid").select().single(); dbError(error); await audit(request, profile, "void", "billing", match[1], input.reason); return success(data, undefined, 200, headers); }
+
+    if (path.startsWith("/reports/") && request.method === "GET") { const report = path.slice(9); const map: Record<string, [string, string | null]> = { appointments: ["appointments", "appointments.read"], queues: ["queues", "queues.read"], revenue: ["payments", "billing.read"], inventory: ["stock_lots", "inventory.read"], movements: ["stock_movements", "inventory.read"], treatments: ["visits", "records.read"], users: ["users", "admin"] }; const config = map[report]; if (!config) throw err("ไม่พบรายงาน", 404, "NOT_FOUND"); if (config[1] === "admin") requireAdmin(profile); else if (config[1]) requirePermission(profile, config[1]); const { data, error } = await db.from(config[0]).select("*").order(config[0] === "payments" ? "payment_date" : "created_at", { ascending: false }).limit(1000); dbError(error); return success(data, undefined, 200, headers); }
+
+    if (path === "/users" && request.method === "GET") { requireAdmin(profile); const { data, error } = await db.from("users").select("*").order("display_name"); dbError(error); return success(data, undefined, 200, headers); }
+    if (path === "/users" && request.method === "POST") { requireAdmin(profile); const input: any = await body(request); const uidValue = String(input.uid || "").trim(); const roles = Array.isArray(input.roles) ? input.roles : []; const allowedRoles = new Set(["admin", "receptionist", "nurse", "doctor", "pharmacist", "cashier"]); if (!uidValue || !input.email || !input.displayName || !roles.length || roles.some((role: string) => !allowedRoles.has(role))) throw err("กรุณาระบุ Firebase UID อีเมล ชื่อ และบทบาทที่ถูกต้อง"); const { data, error } = await db.from("users").insert({ uid: uidValue, email: String(input.email).trim().toLowerCase(), display_name: String(input.displayName).trim(), phone: input.phone || null, roles, active: true, role_selection_completed: true, role_selected_at: nowIso() }).select().single(); dbError(error); await audit(request, profile, "create", "users", uidValue); return success(data, "เพิ่มผู้ใช้สำเร็จ", 201, headers); }
+    if (path === "/google-role-approvals" && request.method === "GET") { requireAdmin(profile); const { data, error } = await db.from("google_role_approvals").select("*").order("created_at", { ascending: false }); dbError(error); return success(data, undefined, 200, headers); }
+    if (path === "/google-role-approvals" && request.method === "POST") {
+      requireAdmin(profile); const input: any = await body(request); const email = String(input.email || "").trim().toLowerCase();
+      let role: string; try { role = validateGoogleRoleSelection({ role: input.role }); } catch { throw err("อีเมลหรือบทบาทที่อนุมัติไม่ถูกต้อง", 400, "VALIDATION_ERROR"); }
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw err("รูปแบบอีเมลไม่ถูกต้อง");
+      const { data: current, error: currentError } = await db.from("google_role_approvals").select("used_by").eq("email", email).maybeSingle(); dbError(currentError);
+      if (current?.used_by) throw err("การอนุมัตินี้ถูกใช้งานแล้ว", 409, "APPROVAL_ALREADY_USED");
+      const { data, error } = await db.from("google_role_approvals").upsert({ email, approved_role: role, active: true, used_by: null, used_at: null, created_by: uid }, { onConflict: "email" }).select().single(); dbError(error);
+      await audit(request, profile, "create", "google_role_approvals", data.approval_id, email); return success(data, "อนุมัติอีเมล Google แล้ว", 201, headers);
+    }
+    match = path.match(/^\/users\/([^/]+)$/);
+    if (match && request.method === "PUT") { requireAdmin(profile); const input: any = toSnake(await body(request)); const { data, error } = await db.from("users").update(input).eq("uid", match[1]).select().single(); dbError(error); await audit(request, profile, "update", "users", match[1]); return success(data, undefined, 200, headers); }
+    match = path.match(/^\/users\/([^/]+)\/disable$/);
+    if (match && request.method === "POST") { requireAdmin(profile); if (match[1] === uid) throw err("ไม่สามารถระงับบัญชีที่กำลังใช้งานอยู่", 422, "BUSINESS_RULE_ERROR"); const { data, error } = await db.from("users").update({ active: false }).eq("uid", match[1]).select().single(); dbError(error); await audit(request, profile, "disable", "users", match[1]); return success(data, undefined, 200, headers); }
+
+    if (path === "/settings" && request.method === "GET") { requireAdmin(profile); const { data, error } = await db.from("clinic_settings").select("key,value"); dbError(error); return success(Object.fromEntries((data || []).map((row) => [row.key, row.value])), undefined, 200, headers); }
+    if (path === "/settings" && request.method === "PUT") { requireAdmin(profile); const input: any = await body(request); const rows = Object.entries(input).map(([key, value]) => ({ key, value, updated_by: uid })); const { error } = await db.from("clinic_settings").upsert(rows); dbError(error); await audit(request, profile, "update", "settings"); return success(input, "บันทึกการตั้งค่าสำเร็จ", 200, headers); }
+    if (path === "/audit-logs" && request.method === "GET") { requireAdmin(profile); const { data, error } = await db.from("audit_logs").select("*").order("occurred_at", { ascending: false }).limit(1000); dbError(error); return success(data, undefined, 200, headers); }
+    match = path.match(/^\/backup\/([a-z_]+)$/i);
+    if (match && request.method === "GET") { requireAdmin(profile); const allowed = new Set(["clinic_settings","users","patients","appointments","queues","screenings","visits","visit_addendums","diagnosis_master","diagnoses","prescriptions","prescription_items","medicines","stock_lots","stock_movements","services","invoices","invoice_items","payments","audit_logs","counters"]); if (!allowed.has(match[1])) throw err("ไม่พบตาราง", 404, "NOT_FOUND"); const { data, error } = await db.from(match[1]).select("*").limit(10000); dbError(error); await audit(request, profile, "export", "backup", match[1]); return success(data, undefined, 200, headers); }
+
+    throw err("ไม่พบ API ที่เรียก", 404, "ROUTE_NOT_FOUND");
+  } catch (error) {
+    const value = error as { status?: number; code?: string };
+    console.error(JSON.stringify({ event: "api_error", requestId, method: request.method, path, status: value.status || 500, code: value.code || "INTERNAL_ERROR" }));
+    return failure(error, headers);
+  }
+});

@@ -1,0 +1,8 @@
+:root {
+  --primary: #087f73; --primary-dark: #075e56; --primary-soft: #dff5f1; --secondary: #1d4ed8;
+  --success: #16845b; --warning: #d97706; --danger: #dc3545; --info: #0284c7;
+  --ink: #18322f; --muted: #647774; --line: #dce7e4; --surface: #fff; --background: #f4f7f6;
+  --sidebar: #0d2f2b; --sidebar-muted: #a9c4bf; --radius: 14px; --radius-sm: 9px;
+  --shadow: 0 8px 28px rgb(11 63 56 / 8%); --sidebar-width: 260px; --topbar-height: 72px;
+  --font: "Noto Sans Thai", system-ui, sans-serif;
+}

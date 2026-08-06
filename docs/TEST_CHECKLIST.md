@@ -1,0 +1,21 @@
+# Manual Test Checklist
+
+- [ ] Login ถูกต้องแล้ว URL เป็น `/#/dashboard`; Refresh แล้วยังอยู่ Route เดิม
+- [ ] Login ผิด, บัญชี disabled, Session หมดอายุ แสดงข้อความไทยและไม่ค้าง
+- [ ] Logout กลับ Login; ผู้ไม่ Login เปิดหน้าภายในไม่ได้; ไม่มี Redirect loop
+- [ ] แต่ละ Role เห็นเมนูและเรียก API ได้เท่าที่กำหนด
+- [ ] เพิ่ม/แก้ไข/ค้นหาผู้ป่วย; Citizen ID ซ้ำหรือผิดรูปแบบถูกปฏิเสธ
+- [ ] สร้าง/ยืนยัน/เลื่อน/ยกเลิก/เช็กอินนัด; เวลาแพทย์ซ้ำถูกปฏิเสธ
+- [ ] Walk-in/นัดหมายออกคิว; เรียกซ้ำ; Transition ผิดถูกปฏิเสธ; Poll 20 วินาที
+- [ ] คัดกรองคำนวณ BMI, เตือนค่าสัญญาณชีพ, ส่ง waiting_doctor
+- [ ] แพทย์เปิด/แก้/ปิด Visit; หลังปิดแก้ไม่ได้และเพิ่ม Addendum ได้
+- [ ] ใบสั่งยา Quantity > 0; แพ้ยาได้รับการทบทวนโดยผู้ใช้
+- [ ] จ่ายยาเลือก FEFO, Lot หมดอายุใช้ไม่ได้, สต็อกไม่ติดลบ, ส่งซ้ำไม่ตัดซ้ำ
+- [ ] รับ/ปรับสต็อกสร้าง Movement; Adjustment มีเหตุผล
+- [ ] Invoice คำนวณถูก; ชำระเต็ม/บางส่วน; เกินยอดไม่ได้; Idempotency ไม่สร้างซ้ำ
+- [ ] Void ต้องมีสิทธิ์และเหตุผล; Paid invoice ไม่ถูกลบ
+- [ ] Dashboard/Reports เป็นข้อมูล API; CSV/JSON/Print ทำงานตามสิทธิ์
+- [ ] Audit บันทึก View/Create/Update/Print/Export/Dispense/Adjust/Void โดยไม่เก็บ Secret
+- [ ] Desktop/Tablet/Mobile; ตารางเปลี่ยนเป็น Card; Drawer/Bottom nav ใช้งานได้
+- [ ] Print A4/80mm ซ่อนเมนู; Error แสดง Card ไม่เป็นหน้าขาว
+- [ ] ปุ่ม Submit ถูก Disable และคืนสถานะเสมอ; ไม่มี Loading ค้าง

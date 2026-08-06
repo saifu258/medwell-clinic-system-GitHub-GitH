@@ -1,0 +1,10 @@
+{
+  "name": "MEDWELL Clinic System",
+  "short_name": "MEDWELL",
+  "start_url": "/#/dashboard",
+  "display": "standalone",
+  "background_color": "#f5f8f7",
+  "theme_color": "#087f73",
+  "lang": "th",
+  "icons": []
+}

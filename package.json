@@ -1,0 +1,25 @@
+{
+  "name": "medwell-clinic-system",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "ระบบบริหารคลินิก MEDWELL",
+  "scripts": {
+    "test": "npm --prefix functions test && node --test tests/unit/*.test.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:stability": "playwright test tests/e2e/refresh-stability.spec.js",
+    "start": "firebase emulators:start --only hosting,auth",
+    "deploy": "firebase deploy --only hosting",
+    "supabase:start": "supabase start",
+    "supabase:check": "supabase db lint --local"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
+  },
+  "dependencies": {
+    "mammoth": "^1.12.0"
+  }
+}
