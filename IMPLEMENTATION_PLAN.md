@@ -1,117 +1,170 @@
-# Implementation Plan: MEDWELL CLINIC SYSTEM Upgrade
+# IMPLEMENTATION PLAN
 
-## User Review Required
-> [!WARNING]
-> **Role Deletion**: We are replacing the old roles (Receptionist, Nurse, Doctor, Pharmacist, Cashier) with the new roles: `physiotherapist`, `thai_traditional_practitioner`, `clinic_assistant`. (Admin remains). 
-> This will mean users assigned to old roles will need to select new roles upon their next login, or an admin will need to re-assign them. Is it acceptable to forcefully prompt them to reselect roles, or do you want an automatic migration of old roles to new roles (e.g. Nurse -> clinic_assistant)?
+## Phase 1A: Verified Audit and Frozen Baseline
+- **Objective**: Establish the truth about the current system architecture and freeze the codebase.
+- **Scope**: Code inspection, database schema review, environment validation.
+- **Dependencies**: Phase 0 completion.
+- **Files likely to change**: Documentation only (Audit reports).
+- **Database changes**: None.
+- **Tests required**: Baseline E2E execution (Dry run).
+- **Entry criteria**: Master prompt approved, Phase 0 finished.
+- **Exit criteria**: Phase 1 Audit Report approved.
+- **Risks**: Missed legacy edge cases.
+- **Rollback point**: Not applicable (no code changes).
+- **Approval required**: YES.
 
-> [!CAUTION]
-> **Workflow Changes**: The workflow completely changes the order of operations. Pharmacy and Dispense steps are essentially being bypassed/modified heavily in favor of a Treatment Program -> Next Appointment -> Billing flow. This will require massive changes to the frontend views. Existing uncompleted queues might break during migration. We plan to mark all pending queues as 'completed' or 'cancelled' before the database migration to prevent inconsistent states. Please confirm this approach.
+## Phase 1B: Migration Design and Approvals
+- **Objective**: Finalize database schemas, UI wireframes, and API contracts.
+- **Scope**: Write SQL migrations without executing them in production.
+- **Dependencies**: Phase 1A.
+- **Files likely to change**: `.sql` migration scripts, UI mockups.
+- **Database changes**: None yet.
+- **Tests required**: None.
+- **Entry criteria**: Phase 1A approved.
+- **Exit criteria**: SQL scripts reviewed and approved.
+- **Risks**: Misunderstanding of clinic workflow.
+- **Rollback point**: Discard SQL scripts.
+- **Approval required**: YES.
 
-## Open Questions
-1. **~~Medical Certificate Form Layout~~**: *(Resolved)* Thank you for the OneDrive link! I have successfully extracted the exact layout, text, and structure for the "ใบรับรองความเจ็บป่วย แพทย์แผนไทย" (including the clinic branding, 4 practitioner license checkboxes, the dotted line fields for symptoms, medical opinion, rest period, and the dual signature area at the bottom right). I will replicate this exactly in the PDF generator and the UI.
-2. **Translation API Keys**: For Google Cloud Translation and Gemini API, do you already have API keys? We will provide the admin UI for you to enter them, but they need to be available for end-to-end testing.
-3. **Data Backup**: The specification asks to back up existing schemas and data before migration. Is there an automated Supabase backup schedule in place, or would you like me to create an SQL dump locally in a file?
+## Phase 2: Authentication and Target RBAC
+- **Objective**: Transition to target roles and remove legacy roles.
+- **Scope**: UI role mapping, API auth middleware, RBAC enforcement.
+- **Dependencies**: Phase 1B.
+- **Files likely to change**: `helpers.ts`, `permissions.js`, `router.js`, `selectRolePage.js`.
+- **Database changes**: `users`, `google_role_approvals` (manual data migration).
+- **Tests required**: Google login tests, role permission unit tests.
+- **Entry criteria**: Phase 1B approved. Phase 2 must not begin until Phase 1B migration design is reviewed and approved.
+- **Exit criteria**: Only 4 active target roles exist in UI and API, plus `pending_role_review`.
+- **Risks**: Lockout of current staff.
+- **Rollback point**: Revert code and restore `users` table from snapshot.
+- **Approval required**: NO.
 
-## Proposed Changes
+## Phase 3: Core Patient Workflow
+- **Objective**: Implement the unified Registration -> Billing workflow.
+- **Scope**: Queue and visit state machines, new Screening and H&P forms.
+- **Dependencies**: Phase 2.
+- **Files likely to change**: `index.ts`, `queuePage.js`, `screeningPage.js`, `clinicalAssessmentPage.js`.
+- **Database changes**: `queues` status check, `visits` schema updates.
+- **Tests required**: E2E workflow tests.
+- **Entry criteria**: Phase 2 complete.
+- **Exit criteria**: Patients can flow from registration to billing seamlessly.
+- **Risks**: Workflow deadlocks.
+- **Rollback point**: Code reversion.
+- **Approval required**: NO.
 
----
+## Phase 4: Treatment Programs and Courses
+- **Objective**: Enable management of treatment courses and session deductions.
+- **Scope**: Course purchase, tracking remaining sessions, deducting sessions.
+- **Dependencies**: Phase 3.
+- **Files likely to change**: `treatmentCoursesPage.js`, `index.ts`.
+- **Database changes**: Create `treatment_programs`, `treatment_courses`, `course_usage`.
+- **Tests required**: Deduction logic tests.
+- **Entry criteria**: Phase 3 complete.
+- **Exit criteria**: Sessions can be correctly bought and consumed.
+- **Risks**: Accounting errors on session balance.
+- **Rollback point**: Drop new tables, revert code.
+- **Approval required**: NO.
 
-### Phase 1: Roles, Database & Security Updates
+## Phase 5: Billing and Numbering
+- **Objective**: Implement partial payments, split payments, and atomic YY+6 receipt numbering.
+- **Scope**: Payment RPC updates, Invoice editing UI.
+- **Dependencies**: Phase 4.
+- **Files likely to change**: `billingPage.js`, `invoiceRevisionPage.js`, `index.ts`.
+- **Database changes**: `receipt_counters`, `invoice_revisions`.
+- **Tests required**: Concurrency testing on sequence generator.
+- **Entry criteria**: Phase 4 complete.
+- **Exit criteria**: Correct receipt format generated without collisions.
+- **Risks**: Invoice duplication or sequence gaps.
+- **Rollback point**: Code reversion.
+- **Approval required**: NO.
 
-#### [MODIFY] supabase/functions/api/helpers.ts
-- Update `permissions` map with new roles (`physiotherapist`, `thai_traditional_practitioner`, `clinic_assistant`).
-- Modify `GOOGLE_SELF_SELECT_ROLES`.
-- Update `hasPermission` logic to reflect new role structure.
+## Phase 6: Medical Certificates and ICD-10
+- **Objective**: Full certificate lifecycle with translation and ICD-10 linkage.
+- **Scope**: Certificate UI, translation API, PDF generation, ICD-10 CSV import.
+- **Dependencies**: Phase 5.
+- **Files likely to change**: `medicalCertificatesPage.js`, `medicalCertificateFormPage.js`, `index.ts`.
+- **Database changes**: `medical_certificates`, `icd10_codes`, certificate sequences.
+- **Tests required**: PDF layout tests, translation API mock tests.
+- **Entry criteria**: Phase 5 complete.
+- **Exit criteria**: PDFs perfectly match the Word template.
+- **Risks**: Layout discrepancies, API key failures.
+- **Rollback point**: Revert code.
+- **Approval required**: YES (for translation API costs/keys. Production certificate translation must remain disabled until Admin configures and validates Google Cloud Translation API or Gemini API).
 
-#### [MODIFY] public/assets/js/permissions.js
-- Sync frontend role permission arrays.
-- Remove obsolete roles from the frontend definitions.
+## Phase 7: Realtime Notifications and Presence
+- **Objective**: Implement global notifications and user presence.
+- **Scope**: Supabase Realtime Channels, Toast UI.
+- **Dependencies**: Phase 6.
+- **Files likely to change**: `notifications.js`, UI wrappers, `index.ts`.
+- **Database changes**: `notifications`, `presence_sessions`.
+- **Tests required**: Multi-tab concurrency tests.
+- **Entry criteria**: Phase 6 complete.
+- **Exit criteria**: Instant toasts on background events.
+- **Risks**: WebSocket connection limits.
+- **Rollback point**: Revert to polling.
+- **Approval required**: NO.
 
-#### [NEW] supabase/migrations/20260806000000_upgrade_schema.sql
-- Create tables: `treatment_programs`, `treatment_templates`, `treatment_courses`, `course_usage`.
-- Create tables: `medical_certificates`, `medical_certificate_counters`, `medical_certificate_number_reservations`, `standard_certificate_texts`.
-- Create tables: `icd10_codes`, `icd10_imports`.
-- Create real-time tables: `notifications`, `presence_sessions`, `export_jobs`, `offline_sync_metadata`, `conflict_histories`.
-- Implement `HN` counter and YY+6 sequences for receipts and medical certificates via Postgres sequence logic and locking functions.
-- Update `queues` and `visits` tables to accommodate the new status enums (e.g., "รอคัดกรอง", "รอสรุปและชำระเงิน").
+## Phase 8: Autosave, Offline Drafts, and Conflict Resolution
+- **Objective**: Prevent data loss via IndexedDB caching.
+- **Scope**: Client-side storage wrappers, 30s loop, diff UI.
+- **Dependencies**: Phase 7.
+- **Files likely to change**: `offlineStorage.js`, `store.js`.
+- **Database changes**: `conflict_histories`.
+- **Tests required**: Network disconnection simulations.
+- **Entry criteria**: Phase 7 complete.
+- **Exit criteria**: Unsaved forms persist across refresh without internet.
+- **Risks**: Corrupt local storage.
+- **Rollback point**: Disable offline module.
+- **Approval required**: NO.
 
-#### [MODIFY] supabase/functions/api/index.ts
-- Expose new endpoints for ICD-10 CSV import, medical certificate PDF generation/retrieval, and export job processing.
-- Add real-time endpoints or integrate Supabase Realtime Channels.
+## Phase 9: Reporting and Exports
+- **Objective**: Generate complex CSVs asynchronously.
+- **Scope**: Background jobs for export processing.
+- **Dependencies**: Phase 8.
+- **Files likely to change**: `reportsPage.js`, `index.ts`.
+- **Database changes**: `export_jobs`.
+- **Tests required**: CSV BOM validation.
+- **Entry criteria**: Phase 8 complete.
+- **Exit criteria**: Large datasets export successfully without timeouts.
+- **Risks**: Edge function timeouts.
+- **Rollback point**: Revert code.
+- **Approval required**: NO.
 
----
+## Phase 10: Security Hardening and Full Regression
+- **Objective**: Validate RLS, API security, and overall stability.
+- **Scope**: Code review, security scan, E2E regression suite execution.
+- **Dependencies**: Phase 9.
+- **Files likely to change**: Any buggy files discovered.
+- **Database changes**: RLS policy adjustments.
+- **Tests required**: Security and Regression tests.
+- **Entry criteria**: All features merged.
+- **Exit criteria**: 100% test pass rate.
+- **Risks**: Found vulnerabilities delay launch.
+- **Rollback point**: Fix issues.
+- **Approval required**: NO.
 
-### Phase 2: Core Clinic Workflow & Frontend UI
+## Phase 11: Staging UAT
+- **Objective**: User Acceptance Testing by the clinic team.
+- **Scope**: Deploy to staging Firebase/Supabase environment.
+- **Dependencies**: Phase 10.
+- **Files likely to change**: None (configuration only).
+- **Database changes**: None.
+- **Tests required**: Manual UAT.
+- **Entry criteria**: Regression passed.
+- **Exit criteria**: Sign-off from clinic owner.
+- **Risks**: User feedback requires major changes.
+- **Rollback point**: Address feedback.
+- **Approval required**: YES.
 
-#### [MODIFY] public/assets/js/router.js
-- Remove obsolete routes (`/pharmacy`, `/doctor`, etc.).
-- Add new routes (`/certificates`, `/certificates/new`, `/icd10-management`).
-
-#### [MODIFY] public/assets/js/pages/screeningPage.js
-- Update screening fields to match requirements (Pain score, BMI auto-calculation, Chief complaint, etc.).
-
-#### [NEW] public/assets/js/pages/clinicalAssessmentPage.js
-- A unified form for Physiotherapists and Thai Traditional Practitioners replacing the doctor workspace.
-- Contains: CC, History, Pain assessment, PE, Assessment, Treatment plan, Selected programs, Next appointment.
-
-#### [NEW] public/assets/js/pages/treatmentCoursesPage.js
-- Manage treatment courses, deductions, and balance tracking.
-
----
-
-### Phase 3: Medical Certificate Module & Translation
-
-#### [NEW] public/assets/js/pages/medicalCertificatesPage.js
-- List page with searching/filtering by status, language, date.
-
-#### [NEW] public/assets/js/pages/medicalCertificateFormPage.js
-- Live preview A4 editor, fetching patient and visit data automatically.
-- Translation integration (calls to Edge API which wraps Google Cloud/Gemini APIs).
-- Draft saving, status management, number reservation logic on open.
-
-#### [NEW] supabase/functions/api/pdfGenerator.ts (or inside `index.ts`)
-- Server-side PDF generation using a library (e.g., pdf-lib or puppeteer in Deno) to guarantee accurate A4 layout for downloading.
-
----
-
-### Phase 4: Billing, Revisions, & Notifications
-
-#### [MODIFY] public/assets/js/pages/billingPage.js
-- Support editable quantities and discounts pre-payment.
-- Support partial payments and split methods.
-- Block payment if case-specific treatment lacks price.
-
-#### [NEW] public/assets/js/pages/invoiceRevisionPage.js
-- Allow post-payment invoice edits, track differences, log audit trails.
-
-#### [NEW] public/assets/js/components/notifications.js
-- Toast manager and Notification Bell drop-down.
-- Setup Supabase Realtime listeners to capture and display global events (action-required, midnight due date checks).
-- Sound queue manager for audio notifications.
-
----
-
-### Phase 5: Autosave & Offline Capability
-
-#### [NEW] public/assets/js/offlineStorage.js
-- Wrapper around IndexedDB (e.g., using `idb` library) to store local drafts with AES encryption.
-- Background sync loop running every 30 seconds.
-
-#### [NEW] public/assets/js/components/conflictResolutionModal.js
-- Side-by-side comparison UI for when server and local records diverge.
-
----
-
-## Verification Plan
-
-### Automated Tests
-- Playwright E2E tests covering the 4 active roles, navigating the entire workflow from registration to billing completion.
-- Edge API unit tests testing role validation and atomic ID generation.
-- Deno node:test executing logic for the YY+6 format and idempotency keys.
-
-### Manual Verification
-- Deploy to a staging Firebase/Supabase environment.
-- Log in as each role to verify UI constraints.
-- Trigger offline mode via Chrome DevTools to verify IndexedDB caching and sync resolution.
-- Verify Thai rendering in generated PDFs and CSV exports.
+## Phase 12: Production Migration and Post-Deployment Validation
+- **Objective**: Go live.
+- **Scope**: Production DB migration, Firebase deployment.
+- **Dependencies**: Phase 11.
+- **Files likely to change**: None.
+- **Database changes**: Apply migrations to Production.
+- **Tests required**: Post-deployment smoke tests.
+- **Entry criteria**: UAT signed off.
+- **Exit criteria**: Live system functional.
+- **Risks**: Production data corruption.
+- **Rollback point**: Restore Phase 0 backup.
+- **Approval required**: YES.

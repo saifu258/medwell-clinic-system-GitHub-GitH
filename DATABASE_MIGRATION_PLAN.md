@@ -1,54 +1,108 @@
 # DATABASE MIGRATION PLAN
 
-## Overview
-The migration will be executed using Supabase migration files. We will preserve existing patient and user data, but restructure the clinical workflow and introduce new tables for treatments, medical certificates, courses, and real-time features.
+## 1. Current Verified Database Baseline
+- **Audit Date**: 2026-08-07
+- **Schema version**: Based on `20260801202355_medwell_initial_schema.sql` and subsequent Phase 0 migrations up to `20260802150241_index_google_role_approval_foreign_keys.sql`.
+- **Key Tables**: `users`, `patients`, `queues`, `appointments`, `visits`, `screenings`, `prescriptions`, `invoices`, `medicines`, `stock_lots`.
 
-## Phase 1: Core System & Roles
-1. **Roles Update**: 
-   - We don't use a `roles` table (it's stored in `users.roles` as an array), but we will update `clinic_settings` and related validation logic.
-2. **Patient HN & Settings**:
-   - Ensure the new `HN` sequence table exists: `create table patient_hn_counters`.
-3. **ICD-10 Updates**:
-   - Alter `diagnosis_master` to `icd10_codes` (or create new `icd10_codes` table to match requirements exactly) with support for English name, Thai name, and active status.
-   - Create `icd10_imports` log table.
+## 2. Legacy Role to Target Role Mapping
+- `admin` -> `admin`
+- `receptionist` -> `clinic_assistant`
+- `nurse` -> `clinic_assistant`
+- `cashier` -> `clinic_assistant`
+- `doctor` -> `pending_role_review`
+- `pharmacist` -> `pending_role_review`
 
-## Phase 2: Treatment & Clinical Data
-1. **Treatment Programs**:
-   - Create `treatment_programs` and `treatment_templates`.
-2. **Treatment Courses**:
-   - Create `treatment_courses` (patient, total_sessions, remaining_sessions).
-   - Create `course_usage` (links to visit, quantity deducted, balance before/after).
-3. **Visits & Workflow Updates**:
-   - Alter `visits` and `queues` statuses to match the new workflow.
-   - Create `physical_examinations` (or alter visits).
-   - Create `visit_treatment_items` (items selected during the visit).
+## 3. Role Migration Recommendation (DO NOT EXECUTE YET)
+We recommend mapping `receptionist`, `nurse`, and `cashier` directly to `clinic_assistant` in the `users` and `google_role_approvals` tables.
 
-## Phase 3: Medical Certificates
-1. **Numbering**:
-   - Create `medical_certificate_counters` and `medical_certificate_number_reservations`.
-2. **Certificates**:
-   - Create `medical_certificates` (patient_id, visit_id, diagnosis, dates, translation data, snapshot data).
-   - Create `standard_certificate_texts`.
+For `doctor` and `pharmacist`, map them to `pending_role_review` with these strict rules:
+- The account remains stored.
+- Do not delete its history or ownership references.
+- Block normal application access.
+- Show a Thai message that Admin must assign a new role.
+- Only Admin can assign `physiotherapist`, `thai_traditional_practitioner`, `clinic_assistant`, or keep `admin` where valid.
+- Record old role, new role, Admin user, date, and time.
+- Do not automatically infer a clinical profession.
 
-## Phase 4: Billing & Revisions
-1. **Receipt Numbering**:
-   - Create `receipt_counters` for atomic YY+6 sequence.
-2. **Invoices & Payments**:
-   - Alter `invoices` to support partial payments effectively.
-   - Create `invoice_revisions` to track post-payment edits.
+## 4. Legacy Workflow-Status Mapping
+The `queues` and `visits` tables currently use old enum values.
+- **Old queue statuses**: `waiting`, `screening`, `waiting_doctor`, `in_consultation`, `waiting_pharmacy`, `waiting_payment`, `completed`, `cancelled`.
+- **Target mapping**:
+  - `waiting_pharmacy` -> `waiting_payment` (skip pharmacy step)
+  - `waiting_doctor` -> `waiting_treatment` (or equivalent target enum)
+- **Constraint Changes**: We will drop the existing `current_status` `CHECK` constraint on `queues` and recreate it with the new allowed values, preserving old ones during transition.
 
-## Phase 5: Real-Time & Offline Support
-1. **Notifications**:
-   - Create `notifications` table (type, read_status, linked_record, due_date).
-2. **Presence & Locks**:
-   - Create `presence_sessions` and `edit_locks` (though locks might be better managed via Supabase Realtime Presence or a dedicated lightweight table).
-3. **Drafts & Offline Sync**:
-   - Create `automatic_drafts` and `conflict_histories`.
-   - Create `offline_sync_metadata`.
-4. **Background Jobs**:
-   - Create `export_jobs` for tracking CSV generation.
+## 5. New and Modified Tables
+- **New Tables**:
+  - `treatment_programs`, `treatment_templates`, `treatment_courses`, `course_usage`
+  - `medical_certificates`, `medical_certificate_counters`, `medical_certificate_number_reservations`, `standard_certificate_texts`
+  - `icd10_codes`, `icd10_imports`
+  - `invoice_revisions`
+  - `receipt_counters`
+  - `notifications`, `presence_sessions`, `export_jobs`, `offline_sync_metadata`, `conflict_histories`
+- **Modified Tables**:
+  - Add structural columns to `visits` for H&P (e.g., `pain_score`, `physical_exam_details`).
+  - Add sequence columns to `invoices`.
 
-## Execution
-- Ensure no data loss by mapping existing `diagnosis_master` to `icd10_codes` if needed.
-- Backup DB before applying migrations.
-- RLS policies must be applied to all new tables.
+## 6. New Enums or Check Constraints
+- Add new statuses to `queues.current_status`.
+- Add `language` enum to `medical_certificates`.
+- Add `revision_reason` enum to `invoice_revisions`.
+
+## 7. New Indexes
+- Create indexes on `icd10_codes(search_vector)`.
+- Create indexes on `medical_certificates(certificate_number)`.
+
+## 8. Foreign Keys
+- `medical_certificates.patient_id` -> `patients.patient_id`
+- `treatment_courses.patient_id` -> `patients.patient_id`
+- `invoice_revisions.invoice_id` -> `invoices.invoice_id`
+
+## 9. Unique Constraints
+- `receipt_counters` -> YY+6 atomic constraint.
+- `medical_certificate_counters` -> YY+6 atomic constraint.
+
+## 10. Atomic Counter and Reservation Functions
+Implement Postgres sequence generator RPCs utilizing `SELECT ... FOR UPDATE SKIP LOCKED` or similar row-level locking to guarantee collision-free sequence generation for Receipts and Medical Certificates.
+
+## 11. RLS and Authorization Changes
+- All new tables MUST have RLS enabled (`ALTER TABLE ... ENABLE ROW LEVEL SECURITY`).
+- Revoke all privileges from `anon` and `authenticated`.
+- Grant explicit CRUD to `service_role`.
+
+## 12. Realtime Publication Changes
+- Enable Realtime on `notifications`, `export_jobs`, and `presence_sessions`.
+
+## 13. Data Backfill Strategy
+- Old `diagnosis_master` rows will be copied to `icd10_codes`.
+- Old `receipt_number` values in `invoices` (if any existed outside `randomCode`) will seed the `receipt_counters`.
+
+## 14. Reconciliation Queries
+- Count matching diagnoses between `diagnosis_master` and `icd10_codes`.
+- Validate all users have mapped roles (except `doctor`).
+
+## 15. Dry-Run Process
+- The migration will first be executed on the local Supabase environment against a restored Phase 0 database snapshot.
+- Reconciliation scripts will run to verify data integrity.
+
+## 16. Staging Migration Process
+- Push to staging environment.
+- Run Playwright E2E tests against staging to ensure no breakages.
+
+## 17. Validation Checkpoints
+- Pre-migration: Backup verification.
+- Post-migration: Record count matches, role mappings applied, sequence counters initialized correctly.
+
+## 18. Rollback Strategy
+- Full point-in-time recovery (PITR) restore using Supabase dashboard if data corruption occurs.
+- Write a `down` migration to revert schema additions, though data loss is expected in a `down` migration of new tables.
+
+## 19. Irreversible-Operation Warnings
+> [!CAUTION]
+> Dropping the `diagnosis_master` table is irreversible. We will NOT drop it in Phase 1. It will remain in the schema until Phase 12 confirms successful migration.
+
+## 20. Explicit Rules Preventing Data Loss
+- **ADDITIVE FIRST**: Do not `DROP TABLE` or `DROP COLUMN` for any existing legacy structure.
+- **NULLABLE NEW COLUMNS**: Any new columns added to existing tables must be nullable or have a default value to prevent breaking existing inserts.
+- **MAINTAIN LEGACY STATUSES**: Do not remove old enums from `CHECK` constraints; append new ones instead.
