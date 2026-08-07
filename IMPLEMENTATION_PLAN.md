@@ -161,7 +161,7 @@
 - **Scope**: Production DB migration, Firebase deployment.
 - **Dependencies**: Phase 11.
 - **Files likely to change**: None.
-- **Database changes**: Apply migrations to Production.
+- **Database changes**: Apply Additive Migration Sets (M01-M15) to Production as per `DATABASE_MIGRATION_PLAN.md` and `MIGRATION_CUTOVER_CHECKLIST.md`.
 - **Tests required**: Post-deployment smoke tests.
 - **Entry criteria**: UAT signed off.
 - **Exit criteria**: Live system functional.
