@@ -20,17 +20,19 @@ Deno.test("Thai citizen ID validation is enforced by the API", () => {
   assertEquals(isValidThaiCitizenId(""), true);
 });
 
-Deno.test("Google first-login accepts exactly the five non-privileged roles", () => {
-  assertEquals(GOOGLE_SELF_SELECT_ROLES, ["receptionist", "nurse", "doctor", "pharmacist", "cashier"]);
+Deno.test("Google first-login accepts exactly the three clinical roles", () => {
+  assertEquals(GOOGLE_SELF_SELECT_ROLES, ["physiotherapist", "thai_traditional_practitioner", "clinic_assistant"]);
   for (const role of GOOGLE_SELF_SELECT_ROLES) assertEquals(validateGoogleRoleSelection({ role }), role);
-  assertEquals(validateGoogleRoleSelection({ role: "  Doctor " }), "doctor");
+  assertEquals(validateGoogleRoleSelection({ role: "  Clinic_Assistant " }), "clinic_assistant");
 });
 
-Deno.test("Google first-login rejects privileged, unknown, blank, and multiple role payloads", () => {
+Deno.test("Google first-login rejects privileged, legacy, unknown, blank, and multiple role payloads", () => {
   const invalid = [
     { role: "admin" }, { role: "administrator" }, { role: "superadmin" }, { role: "owner" }, { role: "system_admin" },
-    { role: "Admin" }, { role: " admin " }, { role: "" }, { role: "unknown" }, { role: ["doctor"] },
-    { roles: ["doctor"] }, { role: "doctor", roles: ["admin"] }, {}, null, ["doctor"]
+    { role: "receptionist" }, { role: "nurse" }, { role: "doctor" }, { role: "pharmacist" }, { role: "cashier" },
+    { role: "pending_role_review" },
+    { role: "Admin" }, { role: " admin " }, { role: "" }, { role: "unknown" }, { role: ["clinic_assistant"] },
+    { roles: ["clinic_assistant"] }, { role: "clinic_assistant", roles: ["admin"] }, {}, null, ["clinic_assistant"]
   ];
   for (const payload of invalid) assertThrows(() => validateGoogleRoleSelection(payload), Error, "ไม่สามารถกำหนดบทบาทนี้ได้");
 });
@@ -67,10 +69,11 @@ Deno.test("appointment input rejects malformed dates, times, extra fields, and r
   ]) assertThrows(() => validateAppointmentInput(payload));
 });
 
-Deno.test("appointment-create permission allows admin/receptionist and rejects the other four roles", () => {
+Deno.test("appointment-create permission allows admin/clinic_assistant and aliases, rejects blocked roles", () => {
   assertEquals(hasPermission({ roles: ["admin"] }, "appointments.write"), true);
+  assertEquals(hasPermission({ roles: ["clinic_assistant"] }, "appointments.write"), true);
   assertEquals(hasPermission({ roles: ["receptionist"] }, "appointments.write"), true);
-  for (const role of ["nurse", "doctor", "pharmacist", "cashier"]) {
+  for (const role of ["doctor", "pharmacist", "pending_role_review"]) {
     assertEquals(hasPermission({ roles: [role] }, "appointments.write"), false);
     const error = assertThrows(() => requirePermission({ roles: [role] }, "appointments.write"));
     assertEquals((error as Error & { status?: number; code?: string }).status, 403);

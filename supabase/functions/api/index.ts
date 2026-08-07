@@ -71,7 +71,8 @@ Deno.serve(async (request: Request) => {
       if (profile) {
         if (!profile.active) { await auditIdentity(request, identity, "google_login_denied", false, "ACCOUNT_DISABLED"); throw err("บัญชีถูกระงับการใช้งาน", 403, "ACCOUNT_DISABLED"); }
         await db.from("users").update({ last_login_at: nowIso() }).eq("uid", uid);
-        return success({ state: "ACTIVE_USER", profile: { ...profile, displayName: profile.display_name }, redirectRoute: "#/dashboard" }, undefined, 200, headers);
+        const isPending = profile.roles?.some((r: string) => ["pending_role_review", "doctor", "pharmacist"].includes(r));
+        return success({ state: "ACTIVE_USER", profile: { ...profile, displayName: profile.display_name, pendingRoleReview: isPending }, redirectRoute: isPending ? "#/role-review" : "#/dashboard" }, undefined, 200, headers);
       }
       if (identity.provider !== "google.com") throw err("ไม่พบบัญชีผู้ใช้ในระบบคลินิก", 403, "PROFILE_NOT_FOUND");
       const email = identity.email.trim().toLowerCase();
@@ -118,8 +119,12 @@ Deno.serve(async (request: Request) => {
     }
 
     const profile = await getProfile(identity.uid);
+    const isPending = profile.roles?.some((r: string) => ["pending_role_review", "doctor", "pharmacist"].includes(r));
 
-    if (request.method === "GET" && path === "/me") return success({ ...profile, displayName: profile.display_name }, undefined, 200, headers);
+    if (request.method === "GET" && path === "/me") return success({ ...profile, displayName: profile.display_name, pendingRoleReview: isPending }, undefined, 200, headers);
+
+    if (isPending) throw err("บัญชีนี้ต้องได้รับการตรวจสอบบทบาท", 403, "PENDING_ROLE_REVIEW");
+
     if (request.method === "POST" && path === "/audit-events") { const input: any = await body(request); const allowed = new Set(["login", "logout", "print", "export"]); if (!allowed.has(input.action)) throw err("ประเภท Audit event ไม่ถูกต้อง"); await audit(request, profile, input.action, String(input.module || "application"), String(input.recordId || ""), String(input.description || "")); return success({ recorded: true }, undefined, 201, headers); }
     if (request.method === "GET" && path === "/clinic-info") { const { data, error } = await db.from("clinic_settings").select("key,value").in("key", ["clinicNameTh", "clinicNameEn", "timezone"]); dbError(error); return success(Object.fromEntries((data || []).map((row) => [row.key, row.value])), undefined, 200, headers); }
     if (request.method === "GET" && path === "/dashboard") return success(await dashboard(), undefined, 200, headers);
@@ -327,7 +332,7 @@ Deno.serve(async (request: Request) => {
     if (path.startsWith("/reports/") && request.method === "GET") { const report = path.slice(9); const map: Record<string, [string, string | null]> = { appointments: ["appointments", "appointments.read"], queues: ["queues", "queues.read"], revenue: ["payments", "billing.read"], inventory: ["stock_lots", "inventory.read"], movements: ["stock_movements", "inventory.read"], treatments: ["visits", "records.read"], users: ["users", "admin"] }; const config = map[report]; if (!config) throw err("ไม่พบรายงาน", 404, "NOT_FOUND"); if (config[1] === "admin") requireAdmin(profile); else if (config[1]) requirePermission(profile, config[1]); const { data, error } = await db.from(config[0]).select("*").order(config[0] === "payments" ? "payment_date" : "created_at", { ascending: false }).limit(1000); dbError(error); return success(data, undefined, 200, headers); }
 
     if (path === "/users" && request.method === "GET") { requireAdmin(profile); const { data, error } = await db.from("users").select("*").order("display_name"); dbError(error); return success(data, undefined, 200, headers); }
-    if (path === "/users" && request.method === "POST") { requireAdmin(profile); const input: any = await body(request); const uidValue = String(input.uid || "").trim(); const roles = Array.isArray(input.roles) ? input.roles : []; const allowedRoles = new Set(["admin", "receptionist", "nurse", "doctor", "pharmacist", "cashier"]); if (!uidValue || !input.email || !input.displayName || !roles.length || roles.some((role: string) => !allowedRoles.has(role))) throw err("กรุณาระบุ Firebase UID อีเมล ชื่อ และบทบาทที่ถูกต้อง"); const { data, error } = await db.from("users").insert({ uid: uidValue, email: String(input.email).trim().toLowerCase(), display_name: String(input.displayName).trim(), phone: input.phone || null, roles, active: true, role_selection_completed: true, role_selected_at: nowIso() }).select().single(); dbError(error); await audit(request, profile, "create", "users", uidValue); return success(data, "เพิ่มผู้ใช้สำเร็จ", 201, headers); }
+    if (path === "/users" && request.method === "POST") { requireAdmin(profile); const input: any = await body(request); const uidValue = String(input.uid || "").trim(); const roles = Array.isArray(input.roles) ? input.roles : []; const allowedRoles = new Set(["admin", "physiotherapist", "thai_traditional_practitioner", "clinic_assistant", "pending_role_review"]); if (!uidValue || !input.email || !input.displayName || !roles.length || roles.some((role: string) => !allowedRoles.has(role))) throw err("กรุณาระบุ Firebase UID อีเมล ชื่อ และบทบาทที่ถูกต้อง"); const { data, error } = await db.from("users").insert({ uid: uidValue, email: String(input.email).trim().toLowerCase(), display_name: String(input.displayName).trim(), phone: input.phone || null, roles, active: true, role_selection_completed: true, role_selected_at: nowIso() }).select().single(); dbError(error); await audit(request, profile, "create", "users", uidValue); return success(data, "เพิ่มผู้ใช้สำเร็จ", 201, headers); }
     if (path === "/google-role-approvals" && request.method === "GET") { requireAdmin(profile); const { data, error } = await db.from("google_role_approvals").select("*").order("created_at", { ascending: false }); dbError(error); return success(data, undefined, 200, headers); }
     if (path === "/google-role-approvals" && request.method === "POST") {
       requireAdmin(profile); const input: any = await body(request); const email = String(input.email || "").trim().toLowerCase();
@@ -340,6 +345,24 @@ Deno.serve(async (request: Request) => {
     }
     match = path.match(/^\/users\/([^/]+)$/);
     if (match && request.method === "PUT") { requireAdmin(profile); const input: any = toSnake(await body(request)); const { data, error } = await db.from("users").update(input).eq("uid", match[1]).select().single(); dbError(error); await audit(request, profile, "update", "users", match[1]); return success(data, undefined, 200, headers); }
+    match = path.match(/^\/users\/([^/]+)\/resolve-role$/);
+    if (match && request.method === "POST") {
+      requireAdmin(profile);
+      const input: any = await body(request);
+      const targetRole = String(input.role || "").trim();
+      const allowedResolution = new Set(["physiotherapist", "thai_traditional_practitioner", "clinic_assistant"]);
+      if (!allowedResolution.has(targetRole)) throw err("บทบาทที่เลือกไม่ถูกต้องสำหรับการตรวจสอบ", 400, "VALIDATION_ERROR");
+      const { data: userRecord, error: userError } = await db.from("users").select("roles").eq("uid", match[1]).single();
+      dbError(userError);
+      const isPending = userRecord?.roles?.some((r: string) => ["pending_role_review", "doctor", "pharmacist"].includes(r));
+      if (!isPending) throw err("บัญชีนี้ไม่ได้อยู่ในสถานะรอตรวจสอบบทบาท", 422, "BUSINESS_RULE_ERROR");
+      const oldRole = userRecord?.roles?.join(",") || "";
+      const { data, error } = await db.from("users").update({ roles: [targetRole], role_selection_completed: true, role_selected_at: nowIso() }).eq("uid", match[1]).select().single();
+      dbError(error);
+      const requestIdValue = request.headers.get("x-request-id") || requestId;
+      await db.from("audit_logs").insert({ user_uid: profile.uid, user_name: profile.display_name, roles: profile.roles, action: "resolve_role", module: "users", record_id: match[1], description: `Admin resolved role: ${oldRole} -> ${targetRole}. source=phase2_role_resolution, reqId=${requestIdValue}`, success: true });
+      return success(data, "กำหนดบทบาทสำเร็จ", 200, headers);
+    }
     match = path.match(/^\/users\/([^/]+)\/disable$/);
     if (match && request.method === "POST") { requireAdmin(profile); if (match[1] === uid) throw err("ไม่สามารถระงับบัญชีที่กำลังใช้งานอยู่", 422, "BUSINESS_RULE_ERROR"); const { data, error } = await db.from("users").update({ active: false }).eq("uid", match[1]).select().single(); dbError(error); await audit(request, profile, "disable", "users", match[1]); return success(data, undefined, 200, headers); }
 

@@ -7,11 +7,9 @@ import { confirmDialog, setButtonLoading } from "../notifications.js";
 import { escapeHtml } from "../formatters.js";
 
 const roles = [
-  { id: "receptionist", name: "เจ้าหน้าที่ต้อนรับ", icon: "clipboard-list", description: "ลงทะเบียนผู้ป่วย นัดหมาย เช็กอิน และจัดการคิว", duties: "ข้อมูลทั่วไป • นัดหมาย • คิวบริการ" },
-  { id: "nurse", name: "พยาบาล", icon: "heart-pulse", description: "คัดกรอง บันทึกสัญญาณชีพ และเตรียมผู้ป่วยพบแพทย์", duties: "คัดกรอง • Vital signs • บันทึกพยาบาล" },
-  { id: "doctor", name: "แพทย์", icon: "stethoscope", description: "ตรวจรักษา วินิจฉัย และออกใบสั่งยา", duties: "เวชระเบียน • วินิจฉัย • ใบสั่งยา" },
-  { id: "pharmacist", name: "เภสัชกร", icon: "pill", description: "ตรวจใบสั่งยา จ่ายยา และดูแลคลังยา", duties: "จ่ายยา • Lot/FEFO • สต็อกยา" },
-  { id: "cashier", name: "การเงิน", icon: "receipt-text", description: "จัดทำใบแจ้งหนี้ รับชำระ และออกใบเสร็จ", duties: "Invoice • รับชำระ • ใบเสร็จ" }
+  { id: "physiotherapist", name: "นักกายภาพบำบัด", icon: "activity", description: "ตรวจประเมิน วางแผน และให้การรักษาทางกายภาพบำบัด", duties: "คัดกรอง • ประเมิน • แผนการรักษา" },
+  { id: "thai_traditional_practitioner", name: "แพทย์แผนไทย", icon: "leaf", description: "ตรวจวินิจฉัย และให้การรักษาด้วยศาสตร์การแพทย์แผนไทย", duties: "คัดกรอง • วินิจฉัย • แผนการรักษา" },
+  { id: "clinic_assistant", name: "ผู้ช่วยคลินิก", icon: "clipboard-list", description: "ลงทะเบียน นัดหมาย จัดการคิว และงานเอกสารทั่วไป", duties: "เวชระเบียน • นัดหมาย • คิวบริการ" }
 ];
 
 export async function render() {

@@ -1,8 +1,10 @@
 import { auth } from "./auth.js";
 import { store } from "./store.js";
-import { can, isAdmin } from "./permissions.js";
+import { can, isAdmin, isPendingRoleReview } from "./permissions.js";
 import { renderShell, setActiveNav } from "./components/layout.js";
 import { toast } from "./notifications.js";
+
+import * as roleReviewPage from "./pages/roleReviewPage.js";
 
 import * as loginPage from "./pages/loginPage.js";
 import * as selectRolePage from "./pages/selectRolePage.js?v=20260802-role-fix-1";
@@ -28,7 +30,7 @@ import * as backupPage from "./pages/backupPage.js";
 import * as notFoundPage from "./pages/notFoundPage.js";
 
 const routes = [
-  [/^login$/, loginPage, null], [/^select-role$/, selectRolePage, null], [/^dashboard$/, dashboardPage, null], [/^patients$/, patientsPage, "patients.read"], [/^patients\/new$/, patientFormPage, "patients.write"],
+  [/^login$/, loginPage, null], [/^select-role$/, selectRolePage, null], [/^role-review$/, roleReviewPage, null], [/^dashboard$/, dashboardPage, null], [/^patients$/, patientsPage, "patients.read"], [/^patients\/new$/, patientFormPage, "patients.write"],
   [/^patients\/([^/]+)\/edit$/, patientFormPage, "patients.write", ["id"]], [/^patients\/([^/]+)$/, patientDetailPage, "patients.read", ["id"]],
   [/^appointments$/, appointmentsPage, "appointments.read"], [/^queue$/, queuePage, "queues.read"], [/^screening$/, screeningPage, "screenings.write"], [/^doctor$/, doctorWorkspacePage, "visits.write"],
   [/^prescriptions$/, prescriptionsPage, "prescriptions.write"], [/^pharmacy$/, pharmacyPage, "dispense.write"], [/^medicines$/, medicinesPage, "medicines.read"], [/^inventory$/, inventoryPage, "inventory.read"],
@@ -52,10 +54,13 @@ async function renderRoute(force = false) {
     const raw = fullRoute.split("?")[0];
     const authenticated = Boolean(auth.currentUser && store.get().profile);
     const selectingRole = Boolean(auth.currentUser && store.get().authState === "NEEDS_ROLE_SELECTION" && !store.get().profile);
+    const pendingReview = Boolean(authenticated && isPendingRoleReview());
     if (selectingRole && raw !== "select-role") { setRoute("select-role"); return; }
     if (!authenticated && !selectingRole && raw !== "login") { setRoute("login"); return; }
-    if (authenticated && raw === "login") { setRoute("dashboard"); return; }
-    if (authenticated && raw === "select-role") { setRoute("dashboard"); return; }
+    if (authenticated && raw === "login") { setRoute(pendingReview ? "role-review" : "dashboard"); return; }
+    if (authenticated && raw === "select-role") { setRoute(pendingReview ? "role-review" : "dashboard"); return; }
+    if (pendingReview && raw !== "role-review") { setRoute("role-review"); return; }
+    if (authenticated && !pendingReview && raw === "role-review") { setRoute("dashboard"); return; }
     if (!force && fullRoute === activeRoute) return;
     const match = routes.map((route) => ({ route, match: raw.match(route[0]) })).find((item) => item.match);
     const [, page = notFoundPage, permission, names = []] = match?.route || [];
@@ -63,7 +68,7 @@ async function renderRoute(force = false) {
     if (activePage?.cleanup) await activePage.cleanup();
     activePage = page;
     activeRoute = fullRoute;
-    if (raw === "login" || raw === "select-role") { await page.render(document.querySelector("#app"), {}); return; }
+    if (raw === "login" || raw === "select-role" || raw === "role-review") { await page.render(document.querySelector("#app"), {}); return; }
     if (!document.querySelector("#page-content")) renderShell();
     const params = Object.fromEntries(names.map((name, index) => [name, match.match[index + 1]])); setActiveNav(raw.split("/")[0]); store.set({ route: raw });
     const root = document.querySelector("#page-content"); try { await page.render(root, params); } catch (error) { root.innerHTML = `<section class="card error-state"><h2>เกิดข้อผิดพลาดในการแสดงหน้า</h2><p>${String(error.message || "ไม่ทราบสาเหตุ")}</p><a class="btn btn-primary" href="#/dashboard">กลับ Dashboard</a></section>`; }

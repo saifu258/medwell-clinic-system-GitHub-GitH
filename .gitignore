@@ -28,3 +28,5 @@ phase0-evidence/restore-rehearsal/**/extracted/
 .supabase/
 supabase/.temp/
 .temp/
+
+!supabase/migrations/20260807063300_phase2_target_rbac_foundation.sql

@@ -37,16 +37,26 @@ export const failure = (error: unknown, headers: HeadersInit = {}) => {
 
 const permissions: Record<string, string[]> = {
   admin: ["*"],
-  receptionist: ["patients.read", "patients.write", "appointments.read", "appointments.write", "queues.read", "queues.write"],
-  nurse: ["patients.read", "queues.read", "screenings.read", "screenings.write"],
-  doctor: ["patients.read", "queues.read", "screenings.read", "records.read", "visits.write", "prescriptions.read", "prescriptions.write", "medicines.read"],
-  pharmacist: ["patients.read", "prescriptions.read", "medicines.read", "inventory.read", "inventory.receive", "dispense.write"],
-  cashier: ["patients.read", "services.read", "billing.read", "billing.write", "payments.write"]
+  // TARGET ROLES
+  physiotherapist: ["patients.read", "queues.read", "queues.write", "screenings.read", "screenings.write", "records.read", "visits.write", "appointments.read", "appointments.write"],
+  thai_traditional_practitioner: ["patients.read", "queues.read", "queues.write", "screenings.read", "screenings.write", "records.read", "visits.write", "appointments.read", "appointments.write"],
+  clinic_assistant: ["patients.read", "patients.write", "appointments.read", "appointments.write", "queues.read", "queues.write", "screenings.read", "screenings.write", "records.read", "visits.write", "billing.read", "billing.write", "payments.write", "services.read", "medicines.read", "inventory.read", "inventory.receive"],
+
+  // TEMPORARY MIGRATION COMPATIBILITY ONLY: Alias legacy operational roles to clinic_assistant.
+  // These will be removed after a future database backfill converts existing legacy rows.
+  receptionist: ["patients.read", "patients.write", "appointments.read", "appointments.write", "queues.read", "queues.write", "screenings.read", "screenings.write", "records.read", "visits.write", "billing.read", "billing.write", "payments.write", "services.read", "medicines.read", "inventory.read", "inventory.receive"],
+  nurse: ["patients.read", "patients.write", "appointments.read", "appointments.write", "queues.read", "queues.write", "screenings.read", "screenings.write", "records.read", "visits.write", "billing.read", "billing.write", "payments.write", "services.read", "medicines.read", "inventory.read", "inventory.receive"],
+  cashier: ["patients.read", "patients.write", "appointments.read", "appointments.write", "queues.read", "queues.write", "screenings.read", "screenings.write", "records.read", "visits.write", "billing.read", "billing.write", "payments.write", "services.read", "medicines.read", "inventory.read", "inventory.receive"],
+
+  // LEGACY ROLES BLOCKED: Treat doctor and pharmacist effectively as pending_role_review
+  doctor: [],
+  pharmacist: [],
+  pending_role_review: []
 };
 export const hasPermission = (profile: { roles?: string[]; permissions?: string[] }, permission: string) => [...(profile.permissions || []), ...(profile.roles || []).flatMap((role) => permissions[role] || [])].some((item) => item === "*" || item === permission);
 export function requirePermission(profile: { roles?: string[]; permissions?: string[] }, permission: string) { if (!hasPermission(profile, permission)) throw Object.assign(new Error("คุณไม่มีสิทธิ์ดำเนินการ"), { status: 403, code: "FORBIDDEN" }); }
 export function requireAdmin(profile: { roles?: string[] }) { if (!profile.roles?.includes("admin")) throw Object.assign(new Error("สงวนสิทธิ์สำหรับผู้ดูแลระบบ"), { status: 403, code: "FORBIDDEN" }); }
-export const GOOGLE_SELF_SELECT_ROLES = ["receptionist", "nurse", "doctor", "pharmacist", "cashier"] as const;
+export const GOOGLE_SELF_SELECT_ROLES = ["physiotherapist", "thai_traditional_practitioner", "clinic_assistant"] as const;
 export function validateGoogleRoleSelection(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw Object.assign(new Error("ไม่สามารถกำหนดบทบาทนี้ได้"), { status: 403, code: "ROLE_NOT_ALLOWED" });
   const input = value as Record<string, unknown>;
