@@ -638,6 +638,106 @@ Deno.serve(async (request: Request) => {
       await audit(request, profile, "daily_close", "financial", data.closing_id);
       return success(data, "ปิดยอดประจำวันสำเร็จ", 201, headers);
     }
+    match = path.match(/^\/users\/([0-9a-f-]+)\/professional-profile$/i);
+    if (match && request.method === "PUT") {
+      requireAdmin(profile);
+      const input: any = await body(request);
+      const { data, error } = await db.from("user_professional_profiles").upsert({
+        uid: match[1],
+        professional_title_th: input.professionalTitleTh,
+        professional_title_en: input.professionalTitleEn,
+        license_number: input.licenseNumber || null,
+        signature_display_name: input.signatureDisplayName,
+        active: input.active !== false,
+        updated_at: new Date().toISOString(),
+        updated_by: uid
+      }).select().single();
+      dbError(error);
+      await audit(request, profile, "update", "professional_profile", match[1]);
+      return success(data, "อัปเดตข้อมูลผู้ประกอบวิชาชีพสำเร็จ", 200, headers);
+    }
+    if (path === "/medical-certificates" && request.method === "POST") {
+      const input: any = await body(request);
+
+      // Determine effective clinical role
+      let clinicalAuthorUid = uid;
+      let clinicalAuthorRole = null;
+
+      if (profile.roles.includes("physiotherapist")) {
+        clinicalAuthorRole = "physiotherapist";
+      } else if (profile.roles.includes("thai_traditional_practitioner")) {
+        clinicalAuthorRole = "thai_traditional_practitioner";
+      } else {
+        throw err("บัญชีนี้ไม่มีสิทธิ์ออกเอกสารทางคลินิก (ต้องเป็นนักกายภาพบำบัด หรือ ผู้ประกอบวิชาชีพการแพทย์แผนไทย)");
+      }
+
+      // Prove patient and visit relationship
+      const { data: visitData, error: visitError } = await db.from("visits")
+        .select("patient_id")
+        .eq("visit_id", input.visitId)
+        .single();
+
+      if (visitError || !visitData) throw err("ไม่พบข้อมูลการเข้ารับบริการ");
+      if (visitData.patient_id !== input.patientId) throw err("ข้อมูลผู้ป่วยและการเข้ารับบริการไม่ตรงกัน");
+
+      const { data, error } = await db.from("medical_certificates").insert({
+        patient_id: input.patientId,
+        visit_id: input.visitId,
+        clinical_author_uid: clinicalAuthorUid,
+        clinical_author_role: clinicalAuthorRole,
+        recommendation: input.recommendation,
+        leave_start_date: input.leaveStartDate || null,
+        leave_end_date: input.leaveEndDate || null,
+        language: input.language || 'th',
+        created_by: uid,
+        updated_by: uid
+      }).select().single();
+      dbError(error);
+      await audit(request, profile, "medical_certificate_draft_create", "documents", data.certificate_id);
+      return success(data, "บันทึกร่างใบรับรองแพทย์สำเร็จ", 201, headers);
+    }
+    match = path.match(/^\/medical-certificates\/([0-9a-f-]+)\/issue$/i);
+    if (match && request.method === "POST") {
+      const input: any = await body(request);
+      if (!input.idempotencyKey) throw err("ต้องระบุ Idempotency Key");
+      const idempotencyKey = input.idempotencyKey;
+      const { data, error } = await db.rpc("medwell_issue_medical_certificate", {
+        p_certificate_id: match[1],
+        p_issued_by: uid,
+        p_idempotency_key: idempotencyKey
+      });
+      dbError(error);
+      await audit(request, profile, "medical_certificate_issue", "documents", match[1]);
+      return success(data, "ออกใบรับรองแพทย์สำเร็จ", 200, headers);
+    }
+    match = path.match(/^\/medical-certificates\/([0-9a-f-]+)\/cancel$/i);
+    if (match && request.method === "POST") {
+      requireAdmin(profile);
+      const input: any = await body(request);
+      const { data, error } = await db.rpc("medwell_cancel_medical_certificate", {
+        p_certificate_id: match[1],
+        p_reason: input.reason,
+        p_cancelled_by: uid
+      });
+      dbError(error);
+      await audit(request, profile, "medical_certificate_cancel", "documents", match[1], input.reason);
+      return success(data, "ยกเลิกใบรับรองแพทย์สำเร็จ", 200, headers);
+    }
+    if (path === "/medical-certificates" && request.method === "GET") {
+      const { data, error } = await db.from("medical_certificates").select(`
+        certificate_id, certificate_number, patient_id, visit_id, status,
+        issued_at, clinical_author_uid, clinical_author_role, language,
+        patient_name_snapshot
+      `).order("created_at", { ascending: false }).limit(100);
+      dbError(error);
+      return success(data, undefined, 200, headers);
+    }
+    match = path.match(/^\/medical-certificates\/([0-9a-f-]+)$/i);
+    if (match && request.method === "GET") {
+      const { data, error } = await db.from("medical_certificates").select().eq("certificate_id", match[1]).single();
+      dbError(error);
+      return success(data, undefined, 200, headers);
+    }
     match = path.match(/^\/visits\/([0-9a-f-]+)\/no-charge$/i);
     if (match && request.method === "POST") {
       requireAdmin(profile);
