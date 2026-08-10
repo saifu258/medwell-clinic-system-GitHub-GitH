@@ -56,6 +56,7 @@ const permissions: Record<string, string[]> = {
 export const hasPermission = (profile: { roles?: string[]; permissions?: string[] }, permission: string) => [...(profile.permissions || []), ...(profile.roles || []).flatMap((role) => permissions[role] || [])].some((item) => item === "*" || item === permission);
 export function requirePermission(profile: { roles?: string[]; permissions?: string[] }, permission: string) { if (!hasPermission(profile, permission)) throw Object.assign(new Error("คุณไม่มีสิทธิ์ดำเนินการ"), { status: 403, code: "FORBIDDEN" }); }
 export function requireAdmin(profile: { roles?: string[] }) { if (!profile.roles?.includes("admin")) throw Object.assign(new Error("สงวนสิทธิ์สำหรับผู้ดูแลระบบ"), { status: 403, code: "FORBIDDEN" }); }
+export function requireClinicalPractitioner(profile: { roles?: string[] }) { if (!profile.roles?.some(r => ["physiotherapist", "thai_traditional_practitioner"].includes(r))) throw Object.assign(new Error("สงวนสิทธิ์เฉพาะผู้ประกอบวิชาชีพเวชกรรม"), { status: 403, code: "UNAUTHORIZED_TREATMENT_ROLE" }); }
 export const GOOGLE_SELF_SELECT_ROLES = ["physiotherapist", "thai_traditional_practitioner", "clinic_assistant"] as const;
 export function validateGoogleRoleSelection(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw Object.assign(new Error("ไม่สามารถกำหนดบทบาทนี้ได้"), { status: 403, code: "ROLE_NOT_ALLOWED" });

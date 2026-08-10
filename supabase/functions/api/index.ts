@@ -1,7 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { db } from "./db.ts";
 import { verifyFirebaseRequest } from "./auth.ts";
-import { dbError, failure, hasPermission, isValidThaiCitizenId, nowIso, nullifyBlankStrings, randomCode, requireAdmin, requirePermission, success, todayBangkok, toSnake, validateAppointmentInput, validateGoogleRoleSelection } from "./helpers.ts";
+import { dbError, failure, hasPermission, isValidThaiCitizenId, nowIso, nullifyBlankStrings, randomCode, requireAdmin, requirePermission, requireClinicalPractitioner, success, todayBangkok, toSnake, validateAppointmentInput, validateGoogleRoleSelection } from "./helpers.ts";
 
 const allowedOrigins = new Set(["http://localhost:5000", "http://127.0.0.1:4173", "https://medwell-clinic-system.web.app", "https://medwell-clinic-system.firebaseapp.com"]);
 const cors = (request: Request) => { const origin = request.headers.get("origin") || ""; return { "access-control-allow-origin": allowedOrigins.has(origin) ? origin : "https://medwell-clinic-system.web.app", "access-control-allow-headers": "authorization, content-type, idempotency-key", "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS", vary: "Origin" }; };
@@ -375,12 +375,166 @@ Deno.serve(async (request: Request) => {
     match = path.match(/^\/prescriptions\/([0-9a-f-]+)\/dispense$/i);
     if (match && request.method === "POST") { requirePermission(profile, "dispense.write"); const { data, error } = await db.rpc("medwell_dispense_prescription", { p_prescription_id: match[1], p_actor: uid }); dbError(error); await audit(request, profile, "dispense", "pharmacy", match[1]); return success(data, "จ่ายยาสำเร็จ", 200, headers); }
 
-    for (const config of [{ path: "medicines", table: "medicines", id: "medicine_id", read: "medicines.read", write: "inventory.receive" }, { path: "services", table: "services", id: "service_id", read: "services.read", write: "billing.write" }]) {
+    for (const config of [{ path: "medicines", table: "medicines", id: "medicine_id", read: "medicines.read", write: "inventory.receive" }, { path: "services", table: "services", id: "service_id", read: "services.read", write: "billing.write" }, { path: "treatment-programs", table: "treatment_programs", id: "program_id", read: "billing.read", write: "billing.write" }]) {
       if (path === `/${config.path}` && request.method === "GET") { requirePermission(profile, config.read); const { data, error } = await db.from(config.table).select("*").order("created_at", { ascending: false }); dbError(error); return success(data, undefined, 200, headers); }
       if (path === `/${config.path}` && request.method === "POST") { requireAdmin(profile); const { data, error } = await db.from(config.table).insert({ ...(toSnake(await body(request)) as object), ...actorFields(uid, true) }).select().single(); dbError(error); return success(data, "สร้างข้อมูลสำเร็จ", 201, headers); }
       const resourceMatch = path.match(new RegExp(`^/${config.path}/([0-9a-f-]+)$`, "i"));
       if (resourceMatch && request.method === "PUT") { requireAdmin(profile); const { data, error } = await db.from(config.table).update({ ...(toSnake(await body(request)) as object), ...actorFields(uid) }).eq(config.id, resourceMatch[1]).select().single(); dbError(error); return success(data, undefined, 200, headers); }
     }
+
+    if (path === "/course-products" && request.method === "GET") {
+      requirePermission(profile, "billing.read");
+      const { data, error } = await db.from("course_products").select("*,course_product_programs(treatment_program_id)").order("created_at", { ascending: false });
+      dbError(error);
+      const mapped = (data || []).map((row: any) => ({ ...row, programs: row.course_product_programs.map((p: any) => p.treatment_program_id) }));
+      return success(mapped, undefined, 200, headers);
+    }
+    if (path === "/course-products" && request.method === "POST") {
+      requireAdmin(profile);
+      const input: any = await body(request);
+      const { data, error } = await db.rpc("medwell_create_course_product", {
+        p_data: toSnake(input),
+        p_programs: input.programs || [],
+        p_actor: uid
+      });
+      dbError(error);
+      return success(data, "สร้างคอร์สสำเร็จ", 201, headers);
+    }
+    match = path.match(/^\/course-products\/([0-9a-f-]+)$/i);
+    if (match && request.method === "PUT") {
+      requireAdmin(profile);
+      const input: any = await body(request);
+      const { data, error } = await db.rpc("medwell_update_course_product", {
+        p_id: match[1],
+        p_data: toSnake(input),
+        p_programs: input.programs || [],
+        p_actor: uid
+      });
+      dbError(error);
+      return success(data, "แก้ไขคอร์สสำเร็จ", 200, headers);
+    }
+
+    match = path.match(/^\/patients\/([0-9a-f-]+)\/courses$/i);
+    if (match && request.method === "GET") {
+      requirePermission(profile, "billing.read");
+      const { data, error } = await db.from("course_enrollments").select("*").eq("patient_id", match[1]).order("created_at", { ascending: false });
+      dbError(error);
+      return success(data, undefined, 200, headers);
+    }
+    if (match && request.method === "POST") {
+      requirePermission(profile, "billing.write");
+      const input: any = await body(request);
+      if (!input.invoiceId) throw err("การซื้อคอร์สต้องผูกกับใบแจ้งหนี้", 400, "VALIDATION_ERROR");
+
+      const idempotencyKey = (request.headers.get("idempotency-key") || "").trim() || crypto.randomUUID();
+      const { data, error } = await db.rpc("medwell_purchase_course_enrollment", {
+        p_patient_id: match[1],
+        p_product_id: input.courseProductId,
+        p_invoice_id: input.invoiceId,
+        p_idempotency_key: idempotencyKey,
+        p_actor: uid
+      });
+      dbError(error);
+      return success(data, "เพิ่มคอร์สผู้ป่วยสำเร็จ", 201, headers);
+    }
+
+    match = path.match(/^\/visits\/([0-9a-f-]+)\/treatments$/i);
+    if (match && request.method === "POST") {
+      requirePermission(profile, "visits.write");
+      requireClinicalPractitioner(profile);
+      const input: any = await body(request);
+      const { data: visit } = await db.from("visits").select("patient_id").eq("visit_id", match[1]).single();
+      if (!visit) throw err("ไม่พบ Visit", 404, "NOT_FOUND");
+
+      let pName = null;
+      let pPrice = 0;
+      if (input.programId) {
+        const { data: prog } = await db.from("treatment_programs").select("name_th, default_price").eq("program_id", input.programId).single();
+        if (!prog) throw err("ไม่พบข้อมูล Program", 400, "VALIDATION_ERROR");
+        pName = prog.name_th;
+        pPrice = prog.default_price;
+      } else if (!input.customTreatmentName) {
+        throw err("กรุณาระบุการรักษา", 400, "VALIDATION_ERROR");
+      }
+
+      const verifiedRole = (profile.roles || []).find((r: string) => r === 'physiotherapist' || r === 'thai_traditional_practitioner');
+
+      const { data, error } = await db.from("visit_treatments").insert({
+        visit_id: match[1],
+        patient_id: visit.patient_id,
+        program_id: input.programId || null,
+        custom_treatment_name: input.customTreatmentName || null,
+        program_name_snapshot: pName,
+        price_snapshot: pPrice,
+        practitioner_uid: uid,
+        practitioner_role: verifiedRole,
+        started_at: input.startedAt || nowIso(),
+        status: "planned",
+        notes: input.notes || null,
+        charge_type: "pay_per_visit",
+        ...actorFields(uid, true)
+      }).select().single();
+      dbError(error);
+      return success(data, "บันทึกข้อมูลการรักษาสำเร็จ", 201, headers);
+    }
+
+    match = path.match(/^\/visit-treatments\/([0-9a-f-]+)\/complete$/i);
+    if (match && request.method === "POST") {
+      requirePermission(profile, "visits.write");
+      requireClinicalPractitioner(profile);
+      const input: any = await body(request);
+      const { data, error } = await db.from("visit_treatments").update({
+        status: "completed",
+        completed_at: nowIso(),
+        result: input.result || null,
+        ...actorFields(uid)
+      }).eq("visit_treatment_id", match[1]).select().single();
+      dbError(error);
+      return success(data, "ดำเนินการรักษาเสร็จสิ้น", 200, headers);
+    }
+
+    match = path.match(/^\/course-enrollments\/([0-9a-f-]+)\/consume$/i);
+    if (match && request.method === "POST") {
+      requirePermission(profile, "visits.write");
+      requireClinicalPractitioner(profile);
+      const input: any = await body(request);
+      if (!input.visitTreatmentId) throw err("ต้องระบุข้อมูลการรักษา", 400, "VALIDATION_ERROR");
+      const verifiedRole = (profile.roles || []).find((r: string) => r === 'physiotherapist' || r === 'thai_traditional_practitioner');
+      const idempotencyKey = (request.headers.get("idempotency-key") || "").trim() || crypto.randomUUID();
+      const { data, error } = await db.rpc("medwell_consume_course_session", {
+        p_enrollment_id: match[1],
+        p_visit_treatment_id: input.visitTreatmentId,
+        p_actor: uid,
+        p_actor_roles: [verifiedRole],
+        p_idempotency_key: idempotencyKey,
+        p_result: input.result || null,
+        p_notes: input.notes || null
+      });
+      if (error) {
+        dbError(error);
+      }
+      return success(data, "ตัดคอร์สสำเร็จ", 200, headers);
+    }
+
+    match = path.match(/^\/course-usage\/([0-9a-f-]+)\/reverse$/i);
+    if (match && request.method === "POST") {
+      requireAdmin(profile);
+      const input: any = await body(request);
+      if (!input.reason) throw err("ต้องระบุเหตุผล", 400, "VALIDATION_ERROR");
+      const idempotencyKey = (request.headers.get("idempotency-key") || "").trim() || crypto.randomUUID();
+      const { data, error } = await db.rpc("medwell_reverse_course_session", {
+        p_usage_id: match[1],
+        p_reason: input.reason,
+        p_actor: uid,
+        p_actor_roles: ['admin'],
+        p_idempotency_key: idempotencyKey
+      });
+      if (error) {
+        dbError(error);
+      }
+      return success(data, "ยกเลิกการตัดคอร์สสำเร็จ", 200, headers);
+    }
+
 
     if (path === "/inventory/receive" && request.method === "POST") { requirePermission(profile, "inventory.receive"); const input: any = toSnake(await body(request)); const { data: lot, error } = await db.rpc("medwell_receive_stock", { p_data: input, p_actor: uid }); dbError(error); await audit(request, profile, "receive", "inventory", lot.lot_id); return success(lot, "รับยาเข้าสต็อกสำเร็จ", 201, headers); }
     if (path === "/inventory/adjust" && request.method === "POST") { requireAdmin(profile); const input: any = await body(request); const { data, error } = await db.rpc("medwell_adjust_stock", { p_lot_id: input.lotId, p_change: Number(input.quantity), p_reason: input.reason, p_actor: uid, p_reference_id: input.idempotencyKey || crypto.randomUUID() }); dbError(error); await audit(request, profile, "adjust", "inventory", input.lotId, input.reason); return success(data, undefined, 200, headers); }
