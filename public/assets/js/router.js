@@ -16,6 +16,7 @@ import * as appointmentsPage from "./pages/appointmentsPage.js?v=20260802-appoin
 import * as queuePage from "./pages/queuePage.js";
 import * as screeningPage from "./pages/screeningPage.js";
 import * as doctorWorkspacePage from "./pages/doctorWorkspacePage.js";
+import * as workflowPage from "./pages/workflowPage.js";
 import * as prescriptionsPage from "./pages/prescriptionsPage.js";
 import * as pharmacyPage from "./pages/pharmacyPage.js";
 import * as medicinesPage from "./pages/medicinesPage.js";
@@ -32,7 +33,7 @@ import * as notFoundPage from "./pages/notFoundPage.js";
 const routes = [
   [/^login$/, loginPage, null], [/^select-role$/, selectRolePage, null], [/^role-review$/, roleReviewPage, null], [/^dashboard$/, dashboardPage, null], [/^patients$/, patientsPage, "patients.read"], [/^patients\/new$/, patientFormPage, "patients.write"],
   [/^patients\/([^/]+)\/edit$/, patientFormPage, "patients.write", ["id"]], [/^patients\/([^/]+)$/, patientDetailPage, "patients.read", ["id"]],
-  [/^appointments$/, appointmentsPage, "appointments.read"], [/^queue$/, queuePage, "queues.read"], [/^screening$/, screeningPage, "screenings.write"], [/^doctor$/, doctorWorkspacePage, "visits.write"],
+  [/^appointments$/, appointmentsPage, "appointments.read"], [/^queue$/, queuePage, "queues.read"], [/^screening$/, screeningPage, "screenings.write"], [/^doctor$/, doctorWorkspacePage, "visits.write"], [/^workflow\/([^/]+)$/, workflowPage, "records.read", ["id"]],
   [/^prescriptions$/, prescriptionsPage, "prescriptions.write"], [/^pharmacy$/, pharmacyPage, "dispense.write"], [/^medicines$/, medicinesPage, "medicines.read"], [/^inventory$/, inventoryPage, "inventory.read"],
   [/^services$/, servicesPage, "admin"], [/^billing$/, billingPage, "billing.read"], [/^reports$/, reportsPage, "admin"], [/^users$/, usersPage, "admin"], [/^settings$/, settingsPage, "admin"], [/^audit-logs$/, auditLogsPage, "admin"], [/^backup$/, backupPage, "admin"]
 ];

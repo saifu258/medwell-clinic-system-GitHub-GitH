@@ -1,4 +1,4 @@
-﻿# Dependencies
+# Dependencies
 node_modules/
 
 # Test output
@@ -30,3 +30,4 @@ supabase/.temp/
 .temp/
 
 !supabase/migrations/20260807063300_phase2_target_rbac_foundation.sql
+!supabase/migrations/20260810090218_phase3_clinical_workflow_foundation.sql
