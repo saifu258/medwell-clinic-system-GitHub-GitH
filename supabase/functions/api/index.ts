@@ -129,9 +129,67 @@ Deno.serve(async (request: Request) => {
     if (request.method === "GET" && path === "/clinic-info") { const { data, error } = await db.from("clinic_settings").select("key,value").in("key", ["clinicNameTh", "clinicNameEn", "timezone"]); dbError(error); return success(Object.fromEntries((data || []).map((row) => [row.key, row.value])), undefined, 200, headers); }
     if (request.method === "GET" && path === "/dashboard") return success(await dashboard(), undefined, 200, headers);
 
+    if (path === "/locks/acquire" && request.method === "POST") {
+      const input: any = await body(request);
+      if (!input.resourceType || !input.resourceId || !input.sessionId) throw err("ข้อมูลไม่ครบถ้วน", 400, "VALIDATION_ERROR");
+
+      if (input.resourceType === "visit_clinical_draft") {
+        requirePermission(profile, "visits.write");
+        const { data: v } = await db.from("visits").select("visit_id").eq("visit_id", input.resourceId).maybeSingle();
+        if (!v) throw err("ไม่พบข้อมูล", 404, "NOT_FOUND");
+      } else if (input.resourceType === "medical_certificate_draft") {
+        requireClinicalPractitioner(profile);
+        const { data: m } = await db.from("medical_certificates").select("certificate_id").eq("certificate_id", input.resourceId).maybeSingle();
+        if (!m) throw err("ไม่พบข้อมูล", 404, "NOT_FOUND");
+      } else {
+        throw err("ประเภทข้อมูลไม่ถูกต้อง", 400, "VALIDATION_ERROR");
+      }
+
+      const { data, error } = await db.rpc("medwell_acquire_edit_lock", {
+        p_resource_type: input.resourceType,
+        p_resource_id: input.resourceId,
+        p_session_id: input.sessionId,
+        p_actor: uid,
+        p_role: profile.roles?.[0] || "unknown"
+      });
+      dbError(error);
+      if (!data.success) throw err("ไม่สามารถล็อกข้อมูลได้ อาจถูกแก้ไขโดยผู้อื่นอยู่", 409, "LOCK_CONFLICT");
+      await audit(request, profile, "acquire_lock", "concurrency", input.resourceId);
+      return success(data, undefined, 200, headers);
+    }
+    let match = path.match(/^\/locks\/([0-9a-f-]+)\/refresh$/i);
+    if (match && request.method === "POST") {
+      const input: any = await body(request);
+      if (!input.sessionId) throw err("ต้องระบุ Session ID", 400, "VALIDATION_ERROR");
+      const { data, error } = await db.rpc("medwell_refresh_edit_lock", { p_lock_id: match[1], p_session_id: input.sessionId });
+      dbError(error);
+      if (!data.success) throw err("ต่ออายุ Lock ไม่สำเร็จ (อาจหมดอายุไปแล้ว)", 409, data.error);
+      return success(data, undefined, 200, headers);
+    }
+    match = path.match(/^\/locks\/([0-9a-f-]+)\/release$/i);
+    if (match && request.method === "POST") {
+      const input: any = await body(request);
+      if (!input.sessionId) throw err("ต้องระบุ Session ID", 400, "VALIDATION_ERROR");
+      const { data, error } = await db.rpc("medwell_release_edit_lock", { p_lock_id: match[1], p_session_id: input.sessionId });
+      dbError(error);
+      if (!data.success) throw err("ปลด Lock ไม่สำเร็จ", 409, data.error);
+      return success(data, undefined, 200, headers);
+    }
+    match = path.match(/^\/locks\/([0-9a-f-]+)\/force-release$/i);
+    if (match && request.method === "POST") {
+      requireAdmin(profile);
+      const input: any = await body(request);
+      if (!input.reason) throw err("ต้องระบุเหตุผล", 400, "VALIDATION_ERROR");
+      const { data, error } = await db.rpc("medwell_force_release_edit_lock", { p_lock_id: match[1], p_reason: input.reason, p_admin_uid: uid });
+      dbError(error);
+      if (!data.success) throw err("ปลด Lock ไม่สำเร็จ", 404, data.error);
+      await audit(request, profile, "force_release_lock", "concurrency", match[1], input.reason);
+      return success(data, "บังคับปลด Lock สำเร็จ", 200, headers);
+    }
+
     if (request.method === "GET" && path === "/patients") { requirePermission(profile, "patients.read"); return success(await listPatients(url), undefined, 200, headers); }
     if (request.method === "POST" && path === "/patients") { requirePermission(profile, "patients.write"); const raw: any = toSnake(await body(request)); const input: any = patientInput(raw); if (!input.first_name || !input.last_name || !input.phone) throw err("กรุณากรอกชื่อ นามสกุล และโทรศัพท์"); if (!isValidThaiCitizenId(input.citizen_id)) throw err("เลขบัตรประชาชนไม่ถูกต้อง"); const { data, error } = await db.from("patients").insert({ ...input, hn: randomCode("HN"), ...actorFields(uid, true) }).select().single(); dbError(error); await audit(request, profile, "create", "patients", data.patient_id); return success(data, "เพิ่มผู้ป่วยสำเร็จ", 201, headers); }
-    let match = path.match(/^\/patients\/([0-9a-f-]+)$/i);
+    match = path.match(/^\/patients\/([0-9a-f-]+)$/i);
     if (match && request.method === "GET") { requirePermission(profile, "patients.read"); const { data, error } = await db.from("patients").select("*").eq("patient_id", match[1]).single(); dbError(error); await audit(request, profile, "view", "patients", match[1]); return success(data, undefined, 200, headers); }
     if (match && request.method === "PUT") { requirePermission(profile, "patients.write"); const raw: any = toSnake(await body(request)); const expected = raw.updated_at; const input: any = patientInput(raw); if (input.citizen_id && !isValidThaiCitizenId(input.citizen_id)) throw err("เลขบัตรประชาชนไม่ถูกต้อง"); const query = db.from("patients").update({ ...input, ...actorFields(uid) }).eq("patient_id", match[1]); if (expected) query.eq("updated_at", expected); const { data, error } = await query.select().maybeSingle(); dbError(error); if (!data) throw err("ข้อมูลถูกแก้ไขโดยผู้ใช้อื่น กรุณารีเฟรช", 409, "CONFLICT"); await audit(request, profile, "update", "patients", match[1]); return success(data, "แก้ไขผู้ป่วยสำเร็จ", 200, headers); }
 
@@ -297,7 +355,7 @@ Deno.serve(async (request: Request) => {
     if (path === "/visits" && request.method === "POST") { requirePermission(profile, "visits.write"); const input: any = toSnake(await body(request)); const { data, error } = await db.rpc("medwell_open_visit", { p_data: input, p_vn: randomCode("VN"), p_visit_date: todayBangkok(), p_actor: uid }); dbError(error); await audit(request, profile, "create", "visits", data.visit_id); return success(data, "เปิด Visit สำเร็จ", 201, headers); }
     match = path.match(/^\/visits\/([0-9a-f-]+)$/i);
     if (match && request.method === "GET") { requirePermission(profile, "records.read"); const { data, error } = await db.from("visits").select("*,diagnoses(*),visit_addendums(*)").eq("visit_id", match[1]).single(); dbError(error); await audit(request, profile, "view", "medical_records", match[1]); return success(data, undefined, 200, headers); }
-    if (match && request.method === "PUT") { requirePermission(profile, "visits.write"); const input: any = toSnake(await body(request)); const protectedFields = ["workflow_stage", "workflow_status", "stage_started_at", "stage_completed_at", "completed_at", "completed_by", "visit_status", "closed_at", "closed_by", "updated_by", "created_by", "created_at", "updated_at", "next_appointment_decision", "next_appointment_id", "next_appointment_recorded_by", "next_appointment_recorded_at", "hp_recorded_by", "hp_recorded_at", "visit_summary_recorded_by", "visit_summary_recorded_at"]; const hasProtected = Object.keys(input).some(k => protectedFields.includes(k)); if (hasProtected) throw err("ไม่อนุญาตให้แก้ไขข้อมูลการควบคุม Workflow ผ่าน API นี้", 400, "VALIDATION_ERROR"); const { data: existing } = await db.from("visits").select("visit_status").eq("visit_id", match[1]).single(); if (existing?.visit_status === "completed") throw err("Visit ปิดแล้ว กรุณาเพิ่ม Addendum", 422, "BUSINESS_RULE_ERROR"); const { data, error } = await db.from("visits").update({ ...input, updated_by: uid }).eq("visit_id", match[1]).select().single(); dbError(error); return success(data, undefined, 200, headers); }
+    if (match && request.method === "PUT") { requirePermission(profile, "visits.write"); const raw: any = toSnake(await body(request)); const expectedVersion = raw.expected_version; const input = { ...raw }; delete input.expected_version; const protectedFields = ["workflow_stage", "workflow_status", "stage_started_at", "stage_completed_at", "completed_at", "completed_by", "visit_status", "closed_at", "closed_by", "updated_by", "created_by", "created_at", "updated_at", "next_appointment_decision", "next_appointment_id", "next_appointment_recorded_by", "next_appointment_recorded_at", "hp_recorded_by", "hp_recorded_at", "visit_summary_recorded_by", "visit_summary_recorded_at"]; const hasProtected = Object.keys(input).some(k => protectedFields.includes(k)); if (hasProtected) throw err("ไม่อนุญาตให้แก้ไขข้อมูลการควบคุม Workflow ผ่าน API นี้", 400, "VALIDATION_ERROR"); const { data: existing } = await db.from("visits").select("visit_status").eq("visit_id", match[1]).single(); if (existing?.visit_status === "completed") throw err("Visit ปิดแล้ว กรุณาเพิ่ม Addendum", 422, "BUSINESS_RULE_ERROR"); const query = db.from("visits").update({ ...input, updated_by: uid }).eq("visit_id", match[1]); if (expectedVersion) query.eq("version", expectedVersion); const { data, error } = await query.select().maybeSingle(); dbError(error); if (!data) throw err("ข้อมูลถูกแก้ไขโดยผู้ใช้อื่น (Version Conflict)", 409, "RECORD_VERSION_CONFLICT"); return success(data, undefined, 200, headers); }
     match = path.match(/^\/visits\/([0-9a-f-]+)\/complete$/i);
     if (match && request.method === "POST") { requirePermission(profile, "visits.write"); const { data: visit } = await db.from("visits").select("visit_status, workflow_stage, queue_id").eq("visit_id", match[1]).single(); if (!visit) throw err("ไม่พบ Visit", 404, "NOT_FOUND"); if (visit.workflow_stage !== null) throw err("Visit นี้อยู่ในระบบ Workflow ใหม่ ต้องปิดผ่าน Workflow Transition เท่านั้น", 409, "WORKFLOW_COMPLETION_REQUIRED"); if (visit.visit_status === "completed") throw err("Visit ปิดแล้ว", 422, "BUSINESS_RULE_ERROR"); const { data, error } = await db.from("visits").update({ visit_status: "completed", closed_at: nowIso(), closed_by: uid, updated_by: uid }).eq("visit_id", match[1]).select().single(); dbError(error); const { count } = await db.from("prescriptions").select("prescription_id", { count: "exact", head: true }).eq("visit_id", match[1]).neq("status", "cancelled"); await db.from("queues").update({ current_status: count ? "waiting_pharmacy" : "waiting_payment", updated_by: uid }).eq("queue_id", data.queue_id); await audit(request, profile, "complete", "visits", match[1]); return success(data, "ปิด Visit สำเร็จ", 200, headers); }
     match = path.match(/^\/visits\/([0-9a-f-]+)\/addendum$/i);
@@ -330,8 +388,11 @@ Deno.serve(async (request: Request) => {
       const { data: visit } = await db.from("visits").select("workflow_stage").eq("visit_id", match[1]).single();
       if (!visit) throw err("ไม่พบ Visit", 404, "NOT_FOUND");
       if (!['history_physical', 'treatment_program'].includes(visit.workflow_stage)) throw err("ไม่สามารถบันทึกข้อมูลในสถานะนี้ได้", 422, "BUSINESS_RULE_ERROR");
-      const { data, error } = await db.from("visits").update({ present_illness: input.present_illness, physical_examination: input.physical_examination, hp_recorded_by: uid, hp_recorded_at: nowIso(), updated_by: uid }).eq("visit_id", match[1]).select().single();
+      const query = db.from("visits").update({ present_illness: input.present_illness, physical_examination: input.physical_examination, hp_recorded_by: uid, hp_recorded_at: nowIso(), updated_by: uid }).eq("visit_id", match[1]);
+      if (input.expected_version) query.eq("version", input.expected_version);
+      const { data, error } = await query.select().maybeSingle();
       dbError(error);
+      if (!data) throw err("ข้อมูลถูกแก้ไขโดยผู้ใช้อื่น (Version Conflict)", 409, "RECORD_VERSION_CONFLICT");
       return success(data, "บันทึกข้อมูลซักประวัติและตรวจร่างกายสำเร็จ", 200, headers);
     }
     match = path.match(/^\/visits\/([0-9a-f-]+)\/workflow\/summary$/i);
@@ -342,8 +403,11 @@ Deno.serve(async (request: Request) => {
       const { data: visit } = await db.from("visits").select("workflow_stage").eq("visit_id", match[1]).single();
       if (!visit) throw err("ไม่พบ Visit", 404, "NOT_FOUND");
       if (!['summary_billing', 'completed', 'next_appointment'].includes(visit.workflow_stage)) throw err("ไม่สามารถบันทึกข้อมูลในสถานะนี้ได้", 422, "BUSINESS_RULE_ERROR");
-      const { data, error } = await db.from("visits").update({ visit_summary: input.visit_summary, visit_summary_recorded_by: uid, visit_summary_recorded_at: nowIso(), updated_by: uid }).eq("visit_id", match[1]).select().single();
+      const query = db.from("visits").update({ visit_summary: input.visit_summary, visit_summary_recorded_by: uid, visit_summary_recorded_at: nowIso(), updated_by: uid }).eq("visit_id", match[1]);
+      if (input.expected_version) query.eq("version", input.expected_version);
+      const { data, error } = await query.select().maybeSingle();
       dbError(error);
+      if (!data) throw err("ข้อมูลถูกแก้ไขโดยผู้ใช้อื่น (Version Conflict)", 409, "RECORD_VERSION_CONFLICT");
       return success(data, "บันทึกสรุปผลการเข้ารับบริการสำเร็จ", 200, headers);
     }
     match = path.match(/^\/visits\/([0-9a-f-]+)\/workflow\/transition$/i);
