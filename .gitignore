@@ -32,3 +32,4 @@ supabase/.temp/
 !supabase/migrations/20260807063300_phase2_target_rbac_foundation.sql
 !supabase/migrations/20260810090218_phase3_clinical_workflow_foundation.sql
 !supabase/migrations/20260810032648_phase4_treatment_course_foundation.sql
+!supabase/migrations/20260810123000_phase5_financial_foundation.sql

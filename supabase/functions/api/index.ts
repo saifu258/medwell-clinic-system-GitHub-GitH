@@ -541,13 +541,119 @@ Deno.serve(async (request: Request) => {
     if (path === "/inventory/low-stock" && request.method === "GET") { requirePermission(profile, "inventory.read"); const { data: meds, error } = await db.from("medicines").select("*,stock_lots(quantity_remaining)").eq("active", true); dbError(error); const rows = (meds || []).map((med: any) => ({ ...med, quantity_remaining: med.stock_lots.reduce((sum: number, lot: any) => sum + Number(lot.quantity_remaining), 0) })).filter((med: any) => med.quantity_remaining <= Number(med.minimum_stock)); return success(rows, undefined, 200, headers); }
     if (path === "/inventory/expiring" && request.method === "GET") { requirePermission(profile, "inventory.read"); const limit = new Date(Date.now() + Number(url.searchParams.get("days") || 90) * 86400000).toISOString().slice(0, 10); const { data, error } = await db.from("stock_lots").select("*,medicines(medicine_code,generic_name,trade_name)").gt("quantity_remaining", 0).gte("expiry_date", todayBangkok()).lte("expiry_date", limit).order("expiry_date"); dbError(error); return success(data, undefined, 200, headers); }
 
-    if (path === "/invoices" && request.method === "POST") { requirePermission(profile, "billing.write"); const input: any = await body(request); if (!Array.isArray(input.items) || !input.items.length) throw err("Invoice ต้องมีรายการ"); for (const item of input.items) { if (!(Number(item.quantity) > 0) || Number(item.unitPrice) < 0 || Number(item.discount || 0) < 0 || Number(item.discount || 0) > Number(item.quantity) * Number(item.unitPrice)) throw err("จำนวน ราคา หรือส่วนลดรายการไม่ถูกต้อง"); } const subtotal = input.items.reduce((sum: number, item: any) => sum + Number(item.quantity) * Number(item.unitPrice) - Number(item.discount || 0), 0); const discount = Number(input.discount || 0); const tax = Number(input.tax || 0); if (discount < 0 || tax < 0 || discount > subtotal) throw err("ส่วนลดหรือภาษีไม่ถูกต้อง"); const grandTotal = subtotal - discount + tax; const invoiceData = toSnake({ visitId: input.visitId, patientId: input.patientId, notes: input.notes || "" }); const items = toSnake(input.items); const { data: invoice, error } = await db.rpc("medwell_create_invoice", { p_data: invoiceData, p_items: items, p_invoice_number: randomCode("INV"), p_invoice_date: todayBangkok(), p_subtotal: subtotal, p_discount: discount, p_tax: tax, p_grand_total: grandTotal, p_actor: uid }); dbError(error); await audit(request, profile, "create", "billing", invoice.invoice_id); return success(invoice, "สร้าง Invoice สำเร็จ", 201, headers); }
+    if (path === "/invoices" && request.method === "POST") {
+      requirePermission(profile, "billing.write");
+      const input: any = await body(request);
+      const idempotency = (request.headers.get("idempotency-key") || input.idempotencyKey || "").trim();
+      if (!idempotency) throw err("ต้องระบุ Idempotency Key", 400, "IDEMPOTENCY_KEY_REQUIRED");
+      if (!Array.isArray(input.items) || !input.items.length) throw err("Invoice ต้องมีรายการ");
+      const discount = Number(input.discount || 0);
+      const tax = Number(input.tax || 0);
+      const items = input.items.map((i: any) => ({
+        item_type: i.itemType,
+        reference_id: i.referenceId,
+        quantity: Number(i.quantity) || 1,
+        discount: Number(i.discount) || 0
+      }));
+      const { data: invoice, error } = await db.rpc("medwell_create_invoice_v2", {
+        p_visit_id: input.visitId,
+        p_patient_id: input.patientId,
+        p_invoice_number: randomCode("INV"),
+        p_items: items,
+        p_discount: discount,
+        p_tax: tax,
+        p_notes: input.notes || "",
+        p_actor: uid
+      });
+      dbError(error);
+      await audit(request, profile, "create", "billing", invoice.invoice_id);
+      return success(invoice, "สร้าง Invoice สำเร็จ", 201, headers);
+    }
     match = path.match(/^\/invoices\/([0-9a-f-]+)$/i);
-    if (match && request.method === "GET") { requirePermission(profile, "billing.read"); const { data, error } = await db.from("invoices").select("*,invoice_items(*),payments(*)").eq("invoice_id", match[1]).single(); dbError(error); return success({ ...data, items: data.invoice_items }, undefined, 200, headers); }
+    if (match && request.method === "GET") {
+      requirePermission(profile, "billing.read");
+      const { data, error } = await db.from("invoices").select("*,invoice_items(*),payments(*)").eq("invoice_id", match[1]).single();
+      dbError(error);
+      return success({ ...data, items: data.invoice_items }, undefined, 200, headers);
+    }
     match = path.match(/^\/invoices\/([0-9a-f-]+)\/payments$/i);
-    if (match && request.method === "POST") { requirePermission(profile, "payments.write"); const input: any = await body(request); const idempotency = request.headers.get("idempotency-key") || input.idempotencyKey; const { data, error } = await db.rpc("medwell_record_payment", { p_invoice_id: match[1], p_amount: Number(input.amount), p_method: input.paymentMethod || "cash", p_reference: input.referenceNumber || "", p_notes: input.notes || "", p_idempotency_key: idempotency, p_actor: uid }); dbError(error); await audit(request, profile, "payment", "billing", match[1]); return success(data, "รับชำระเงินสำเร็จ", 201, headers); }
+    if (match && request.method === "POST") {
+      requirePermission(profile, "payments.write");
+      const input: any = await body(request);
+      const idempotency = (request.headers.get("idempotency-key") || input.idempotencyKey || "").trim();
+      if (!idempotency) throw err("ต้องระบุ Idempotency Key", 400, "IDEMPOTENCY_KEY_REQUIRED");
+      const { data, error } = await db.rpc("medwell_record_payment", {
+        p_invoice_id: match[1],
+        p_amount: Number(input.amount),
+        p_method: input.paymentMethod || "cash",
+        p_reference: input.referenceNumber || "",
+        p_notes: input.notes || "",
+        p_idempotency_key: idempotency,
+        p_actor: uid
+      });
+      dbError(error);
+      await audit(request, profile, "payment", "billing", match[1]);
+      return success(data, "รับชำระเงินและออกใบเสร็จสำเร็จ", 201, headers);
+    }
+    match = path.match(/^\/invoices\/([0-9a-f-]+)\/refunds$/i);
+    if (match && request.method === "POST") {
+      requireAdmin(profile);
+      const input: any = await body(request);
+      const idempotency = (request.headers.get("idempotency-key") || input.idempotencyKey || "").trim();
+      if (!idempotency) throw err("ต้องระบุ Idempotency Key", 400, "IDEMPOTENCY_KEY_REQUIRED");
+      const { data, error } = await db.rpc("medwell_issue_refund", {
+        p_invoice_id: match[1],
+        p_payment_id: input.paymentId,
+        p_amount: Number(input.amount),
+        p_reason: input.reason,
+        p_idempotency_key: idempotency,
+        p_actor: uid
+      });
+      dbError(error);
+      await audit(request, profile, "refund", "billing", match[1], input.reason);
+      return success(data, "คืนเงินสำเร็จ", 201, headers);
+    }
     match = path.match(/^\/invoices\/([0-9a-f-]+)\/void$/i);
-    if (match && request.method === "POST") { requireAdmin(profile); const input: any = await body(request); if (!input.reason) throw err("กรุณาระบุเหตุผล Void"); const { data, error } = await db.from("invoices").update({ status: "void", void_reason: input.reason, voided_at: nowIso(), voided_by: uid, updated_by: uid }).eq("invoice_id", match[1]).neq("status", "paid").select().single(); dbError(error); await audit(request, profile, "void", "billing", match[1], input.reason); return success(data, undefined, 200, headers); }
+    if (match && request.method === "POST") {
+      requireAdmin(profile);
+      const input: any = await body(request);
+      const { data, error } = await db.rpc("medwell_void_invoice_v2", {
+        p_invoice_id: match[1],
+        p_reason: input.reason,
+        p_actor: uid
+      });
+      dbError(error);
+      await audit(request, profile, "void", "billing", match[1], input.reason);
+      return success(data, undefined, 200, headers);
+    }
+    if (path === "/daily-closing" && request.method === "POST") {
+      requireAdmin(profile);
+      const input: any = await body(request);
+      const { data, error } = await db.rpc("medwell_close_business_day", {
+        p_date: input.businessDate || new Date().toISOString().slice(0, 10),
+        p_actual_cash: Number(input.actualCash),
+        p_actor: uid
+      });
+      dbError(error);
+      await audit(request, profile, "daily_close", "financial", data.closing_id);
+      return success(data, "ปิดยอดประจำวันสำเร็จ", 201, headers);
+    }
+    match = path.match(/^\/visits\/([0-9a-f-]+)\/no-charge$/i);
+    if (match && request.method === "POST") {
+      requireAdmin(profile);
+      const input: any = await body(request);
+      if (!input.reason) throw err("ต้องระบุเหตุผล", 400, "VALIDATION_ERROR");
+      const { data, error } = await db.from("visit_financial_dispositions").upsert({
+        visit_id: match[1],
+        disposition: 'no_charge',
+        reason: input.reason,
+        approved_by: uid,
+        created_at: nowIso()
+      }).select().single();
+      dbError(error);
+      await audit(request, profile, "no_charge", "visits", match[1], input.reason);
+      return success(data, "บันทึก No-Charge สำเร็จ", 200, headers);
+    }
 
     if (path.startsWith("/reports/") && request.method === "GET") { const report = path.slice(9); const map: Record<string, [string, string | null]> = { appointments: ["appointments", "appointments.read"], queues: ["queues", "queues.read"], revenue: ["payments", "billing.read"], inventory: ["stock_lots", "inventory.read"], movements: ["stock_movements", "inventory.read"], treatments: ["visits", "records.read"], users: ["users", "admin"] }; const config = map[report]; if (!config) throw err("ไม่พบรายงาน", 404, "NOT_FOUND"); if (config[1] === "admin") requireAdmin(profile); else if (config[1]) requirePermission(profile, config[1]); const { data, error } = await db.from(config[0]).select("*").order(config[0] === "payments" ? "payment_date" : "created_at", { ascending: false }).limit(1000); dbError(error); return success(data, undefined, 200, headers); }
 
