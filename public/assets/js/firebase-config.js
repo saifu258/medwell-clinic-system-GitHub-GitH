@@ -1,10 +1,12 @@
-// ใส่ค่า Web App จาก Firebase Console (ไฟล์นี้ไม่มี Admin credential หรือ secret)
-export const firebaseConfig = {
-  apiKey: "AIzaSyBgG7kiFeehD2IUgWVDVsGd4_v1L8iOvWQ",
-  authDomain: "medwell-clinic-system.firebaseapp.com",
-  projectId: "medwell-clinic-system",
-  storageBucket: "medwell-clinic-system.firebasestorage.app",
-  messagingSenderId: "569102271370",
-  appId: "1:569102271370:web:ee49211a341fca17c93e73",
-  measurementId: "G-25GZHQDYC9"
-};
+import { MEDWELL_RUNTIME_CONFIG } from "./runtime-config.js";
+
+const config = MEDWELL_RUNTIME_CONFIG.firebase;
+if (!config || config.projectId !== MEDWELL_RUNTIME_CONFIG.firebaseHostingProjectId) {
+  throw new Error("Firebase runtime configuration identity mismatch");
+}
+if (config.authDomain !== `${config.projectId}.firebaseapp.com` && config.authDomain !== `${config.projectId}.web.app`) {
+  throw new Error("Firebase runtime auth domain mismatch");
+}
+
+// Firebase Web configuration is public client configuration, never an Admin credential.
+export const firebaseConfig = Object.freeze({ ...config });

@@ -1,6 +1,7 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import { getEdgeConfig } from "./environment.ts";
 
-const firebaseProjectId = "medwell-clinic-system";
+const firebaseProjectId = getEdgeConfig().firebaseProjectId;
 const firebaseKeys = createRemoteJWKSet(new URL("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"));
 
 export type FirebaseUser = { uid: string; email: string; name?: string; picture?: string; provider?: string };

@@ -1,10 +1,11 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { db } from "./db.ts";
 import { verifyFirebaseRequest } from "./auth.ts";
+import { getEdgeConfig } from "./environment.ts";
 import { dbError, failure, hasPermission, isValidThaiCitizenId, nowIso, nullifyBlankStrings, randomCode, requireAdmin, requirePermission, requireClinicalPractitioner, success, todayBangkok, toSnake, validateAppointmentInput, validateGoogleRoleSelection } from "./helpers.ts";
 
-const allowedOrigins = new Set(["http://localhost:5000", "http://127.0.0.1:4173", "https://medwell-clinic-system.web.app", "https://medwell-clinic-system.firebaseapp.com"]);
-const cors = (request: Request) => { const origin = request.headers.get("origin") || ""; return { "access-control-allow-origin": allowedOrigins.has(origin) ? origin : "https://medwell-clinic-system.web.app", "access-control-allow-headers": "authorization, content-type, idempotency-key", "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS", vary: "Origin" }; };
+const { allowedOrigins } = getEdgeConfig();
+const cors = (origin: string) => ({ ...(origin ? { "access-control-allow-origin": origin } : {}), "access-control-allow-headers": "authorization, content-type, idempotency-key", "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS", vary: "Origin" });
 const body = async (request: Request) => request.headers.get("content-type")?.includes("application/json") ? await request.json() : {};
 const actorFields = (uid: string, creating = false) => ({ ...(creating ? { created_by: uid } : {}), updated_by: uid });
 const routePath = (request: Request) => { const pathname = new URL(request.url).pathname; const marker = pathname.indexOf("/api"); return marker >= 0 ? pathname.slice(marker + 4) || "/" : pathname; };
@@ -59,7 +60,11 @@ async function dashboard() {
 Deno.serve(async (request: Request) => {
   const requestId = crypto.randomUUID();
   const path = routePath(request);
-  const headers = { ...cors(request), "x-request-id": requestId };
+  const origin = request.headers.get("origin") || "";
+  if (origin && !allowedOrigins.has(origin)) {
+    return failure(Object.assign(new Error("Origin is not allowed"), { status: 403, code: "CORS_ORIGIN_DENIED" }), { vary: "Origin", "x-request-id": requestId });
+  }
+  const headers = { ...cors(origin), "x-request-id": requestId };
   if (request.method === "OPTIONS") return new Response("ok", { headers });
   try {
     const url = new URL(request.url);

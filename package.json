@@ -5,6 +5,8 @@
   "version": "1.0.0",
   "description": "ระบบบริหารคลินิก MEDWELL",
   "scripts": {
+    "build:config": "node scripts/build-config.mjs",
+    "preflight:staging": "node scripts/staging-preflight.mjs",
     "test": "npm --prefix functions test && node --test tests/unit/*.test.mjs",
     "test:e2e": "playwright test",
     "test:e2e:stability": "playwright test tests/e2e/refresh-stability.spec.js",

@@ -9,13 +9,13 @@ test("หน้า Login แสดง Google Sign-In และยังคงฟ
 });
 
 test("Firebase production config ตรงกับโปรเจกต์และ CSP อนุญาต auth iframe แบบจำกัด origin", async () => {
-  const configSource = fs.readFileSync("public/assets/js/firebase-config.js", "utf8");
+  const configSource = fs.readFileSync("public/assets/js/runtime-config.js", "utf8");
   const hosting = JSON.parse(fs.readFileSync("firebase.json", "utf8"));
   const csp = hosting.hosting.headers[0].headers.find((header) => header.key === "Content-Security-Policy").value;
-  expect(configSource).toContain('projectId: "medwell-clinic-system"');
-  expect(configSource).toContain('authDomain: "medwell-clinic-system.firebaseapp.com"');
-  expect(configSource).toContain('messagingSenderId: "569102271370"');
-  expect(configSource).toContain('appId: "1:569102271370:web:ee49211a341fca17c93e73"');
+  expect(configSource).toContain('"projectId": "medwell-clinic-system"');
+  expect(configSource).toContain('"authDomain": "medwell-clinic-system.firebaseapp.com"');
+  expect(configSource).toContain('"messagingSenderId": "569102271370"');
+  expect(configSource).toContain('"appId": "1:569102271370:web:ee49211a341fca17c93e73"');
   expect(csp).toContain("frame-src 'self' https://medwell-clinic-system.firebaseapp.com https://accounts.google.com");
   expect(csp).toContain("script-src 'self' https://www.gstatic.com https://apis.google.com");
   expect(csp).not.toContain("frame-src *");

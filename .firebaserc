@@ -1,5 +1,7 @@
 {
   "projects": {
-    "default": "medwell-clinic-system"
+    "default": "medwell-clinic-system",
+    "production": "medwell-clinic-system",
+    "staging": "medwell-clinic-staging"
   }
 }

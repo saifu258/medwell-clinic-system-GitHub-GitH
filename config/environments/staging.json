@@ -1,0 +1,18 @@
+{
+  "environment": "staging",
+  "firebaseProjectId": "medwell-clinic-staging",
+  "firebaseApiKey": "AIzaSyBGDE4tB0Cy-O1IjOmCpUeZUaUDqBMsl_U",
+  "firebaseAuthDomain": "medwell-clinic-staging.firebaseapp.com",
+  "firebaseStorageBucket": "medwell-clinic-staging.firebasestorage.app",
+  "firebaseMessagingSenderId": "667966448562",
+  "firebaseAppId": "1:667966448562:web:5802446feff4a2cac53aab",
+  "firebaseMeasurementId": "G-82LWHSVZ99",
+  "firebaseHostingProjectId": "medwell-clinic-staging",
+  "supabaseProjectRef": "mrgjpgcppvikyrtaspuf",
+  "supabaseApiUrl": "https://mrgjpgcppvikyrtaspuf.supabase.co/functions/v1/api",
+  "supabaseRegion": "ap-southeast-1",
+  "allowedOrigins": [
+    "https://medwell-clinic-staging.web.app",
+    "https://medwell-clinic-staging.firebaseapp.com"
+  ]
+}

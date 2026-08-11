@@ -1,0 +1,17 @@
+{
+  "environment": "production",
+  "firebaseProjectId": "medwell-clinic-system",
+  "firebaseApiKey": "AIzaSyBgG7kiFeehD2IUgWVDVsGd4_v1L8iOvWQ",
+  "firebaseAuthDomain": "medwell-clinic-system.firebaseapp.com",
+  "firebaseStorageBucket": "medwell-clinic-system.firebasestorage.app",
+  "firebaseMessagingSenderId": "569102271370",
+  "firebaseAppId": "1:569102271370:web:ee49211a341fca17c93e73",
+  "firebaseMeasurementId": "G-25GZHQDYC9",
+  "firebaseHostingProjectId": "medwell-clinic-system",
+  "supabaseProjectRef": "rubqdcvwrwatxdrtfxkg",
+  "supabaseApiUrl": "https://rubqdcvwrwatxdrtfxkg.supabase.co/functions/v1/api",
+  "allowedOrigins": [
+    "https://medwell-clinic-system.web.app",
+    "https://medwell-clinic-system.firebaseapp.com"
+  ]
+}

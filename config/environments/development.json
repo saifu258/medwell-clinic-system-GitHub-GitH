@@ -1,0 +1,17 @@
+{
+  "environment": "development",
+  "firebaseProjectId": "UNASSIGNED",
+  "firebaseApiKey": "UNASSIGNED",
+  "firebaseAuthDomain": "UNASSIGNED",
+  "firebaseStorageBucket": "UNASSIGNED",
+  "firebaseMessagingSenderId": "UNASSIGNED",
+  "firebaseAppId": "UNASSIGNED",
+  "firebaseMeasurementId": "",
+  "firebaseHostingProjectId": "UNASSIGNED",
+  "supabaseProjectRef": "LOCAL_ONLY",
+  "supabaseApiUrl": "http://127.0.0.1:54321/functions/v1/api",
+  "allowedOrigins": [
+    "http://127.0.0.1:4173",
+    "http://localhost:5000"
+  ]
+}
