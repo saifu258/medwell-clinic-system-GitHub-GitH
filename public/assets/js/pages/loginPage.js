@@ -4,11 +4,10 @@ import { setRoute } from "../router.js";
 import { apiPost } from "../api.js";
 import { setButtonLoading, toast } from "../notifications.js";
 import { escapeHtml } from "../formatters.js";
+import { GOOGLE_AUTH_MESSAGES, routeForGoogleSession } from "../googleLoginFlow.js";
 
 const googleMessages = {
-  "auth/popup-closed-by-user": "ปิดหน้าต่าง Google ก่อนเข้าสู่ระบบสำเร็จ กรุณาลองใหม่",
-  "auth/popup-blocked": "เบราว์เซอร์บล็อกหน้าต่าง Google ระบบกำลังเปลี่ยนไปใช้การเข้าสู่ระบบแบบ Redirect",
-  "auth/cancelled-popup-request": "ยกเลิกคำขอ Google เดิมแล้ว กรุณากดเข้าสู่ระบบอีกครั้ง",
+  ...GOOGLE_AUTH_MESSAGES,
   "auth/account-exists-with-different-credential": "อีเมลนี้มีบัญชีด้วยวิธีอื่นอยู่แล้ว กรุณาเข้าสู่ระบบด้วยวิธีเดิม",
   "auth/unauthorized-domain": "โดเมนนี้ยังไม่ได้รับอนุญาตใน Firebase Authentication",
   "auth/network-request-failed": "เครือข่ายขัดข้อง กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่",
@@ -29,6 +28,7 @@ export async function render() {
   const password = form.password;
   const errorBox = document.querySelector("#login-error");
   const showError = (error, messages = {}) => { errorBox.textContent = messages[error.code] || googleMessages[error.code] || error.message || "เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่"; errorBox.hidden = false; };
+  const clearError = () => { errorBox.textContent = ""; errorBox.hidden = true; };
 
   document.querySelector(".password-toggle").addEventListener("click", (event) => { password.type = password.type === "password" ? "text" : "password"; event.currentTarget.innerHTML = `<i data-lucide="${password.type === "password" ? "eye" : "eye-off"}"></i>`; window.lucide?.createIcons(); });
   form.addEventListener("submit", async (event) => {
@@ -38,14 +38,17 @@ export async function render() {
     finally { setButtonLoading(button, false); }
   });
   document.querySelector("#google-login").addEventListener("click", async (event) => {
-    const button = event.currentTarget; if (button.disabled) return; errorBox.hidden = true; setButtonLoading(button, true, "กำลังเชื่อมต่อ Google…");
+    const button = event.currentTarget; if (button.disabled) return; clearError(); setButtonLoading(button, true, "กำลังเชื่อมต่อ Google…");
     try {
-      const user = await loginWithGoogle();
-      if (!user) return;
-      await apiPost("/auth/google-login-audit", {});
-      const result = await resolveSessionState(user);
-      setRoute(result.state === "NEEDS_ROLE_SELECTION" ? "select-role" : "dashboard");
-    } catch (error) { if (["ACCOUNT_DISABLED", "ACCESS_DENIED"].includes(error.code)) await logout(); showError(error); }
+      const result = await loginWithGoogle(async (user) => {
+        clearError();
+        const session = await resolveSessionState(user, { force: true });
+        await apiPost("/auth/google-login-audit", {});
+        return session;
+      });
+      clearError();
+      setRoute(routeForGoogleSession(result));
+    } catch (error) { if (["ACCOUNT_DISABLED", "ACCESS_DENIED", "PROFILE_NOT_FOUND"].includes(error.code)) await logout(); showError(error); }
     finally { setButtonLoading(button, false); }
   });
   document.querySelector("#forgot").addEventListener("click", async () => { const email = form.email.value.trim(); if (!email) return toast("กรุณากรอกอีเมลก่อน", "error"); try { await resetPassword(email); toast("ส่งอีเมลตั้งรหัสผ่านใหม่แล้ว"); } catch { toast("ไม่สามารถส่งอีเมลได้ กรุณาตรวจสอบอีเมล", "error"); } });

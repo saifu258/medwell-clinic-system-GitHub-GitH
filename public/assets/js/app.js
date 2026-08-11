@@ -1,4 +1,4 @@
-import { authReady, auth, googleRedirectReady, logout, onSessionChange } from "./auth.js";
+import { authReady, auth, isGoogleLoginInProgress, logout, onSessionChange } from "./auth.js";
 import { store } from "./store.js";
 import { startRouter, navigate, setRoute } from "./router.js?v=20260802-google-auth-1";
 import { clearSessionCache, resolveSessionState } from "./session.js";
@@ -21,14 +21,14 @@ function renderStartupError(error) {
 
 async function performBootstrap() {
   initializeGlobalHandlers();
-  const redirectUser = await googleRedirectReady;
-  const user = redirectUser || await authReady;
+  const user = await authReady;
   if (user) await resolveSessionState(user);
   startRouter();
   applicationReady = true;
   onSessionChange(async (nextUser) => {
     if (!applicationReady) return;
     if (!nextUser) { clearSessionCache(); setRoute("login"); return; }
+    if (isGoogleLoginInProgress()) return;
     try { const result = await resolveSessionState(nextUser); setRoute(result.state === "NEEDS_ROLE_SELECTION" ? "select-role" : "dashboard"); await navigate({ force: true }); }
     catch (error) {
       if (["ACCOUNT_DISABLED", "PROFILE_NOT_FOUND", "ACCESS_DENIED"].includes(error.code)) await logout();

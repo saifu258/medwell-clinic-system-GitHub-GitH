@@ -1,14 +1,14 @@
 import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
-import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, sendPasswordResetEmail, setPersistence, browserLocalPersistence, browserSessionPersistence, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, sendPasswordResetEmail, setPersistence, browserLocalPersistence, browserSessionPersistence, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
 import { firebaseConfig } from "./firebase-config.js";
 import { store } from "./store.js";
 import { SUPABASE_API_URL } from "./supabase-config.js";
+import { createGoogleLoginFlow } from "./googleLoginFlow.js";
 
 const firebaseApp = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(firebaseApp);
 const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: "select_account" });
-export const googleRedirectReady = getRedirectResult(auth).then((result) => result?.user || null).catch((error) => { logSafeAuthError(error, "google_redirect_result"); throw error; });
 const authDebugEnabled = ["localhost", "127.0.0.1"].includes(location.hostname) || new URLSearchParams(location.search).get("debugAuth") === "1";
 function logSafeAuthError(error, operation) {
   if (!authDebugEnabled) return;
@@ -39,18 +39,9 @@ export const authReady = new Promise((resolve) => {
 });
 export function onSessionChange(listener) { sessionListeners.add(listener); return () => sessionListeners.delete(listener); }
 export async function login(email, password, remember = false) { await setPersistence(auth, remember ? browserLocalPersistence : browserSessionPersistence); const credential = await signInWithEmailAndPassword(auth, email, password); if (remember) localStorage.setItem("medwell_email", email); else localStorage.removeItem("medwell_email"); return credential.user; }
-export async function loginWithGoogle() {
-  await setPersistence(auth, browserLocalPersistence);
-  try { return (await signInWithPopup(auth, googleProvider)).user; }
-  catch (error) {
-    logSafeAuthError(error, "google_popup");
-    if (error.code === "auth/popup-blocked") {
-      try { await signInWithRedirect(auth, googleProvider); return null; }
-      catch (redirectError) { logSafeAuthError(redirectError, "google_redirect"); throw redirectError; }
-    }
-    throw error;
-  }
-}
+const googleLoginFlow = createGoogleLoginFlow({ auth, provider: googleProvider, persistence: browserLocalPersistence, setPersistence, signInWithPopup, onAuthError: logSafeAuthError });
+export const loginWithGoogle = (afterAuthentication) => googleLoginFlow.run(afterAuthentication);
+export const isGoogleLoginInProgress = () => googleLoginFlow.isInProgress();
 let refreshTokenPromise = null;
 export function refreshIdToken() {
   if (!auth.currentUser) return Promise.reject(Object.assign(new Error("กรุณาเข้าสู่ระบบ"), { code: "UNAUTHENTICATED" }));
